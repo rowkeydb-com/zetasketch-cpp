@@ -127,6 +127,7 @@ build:remote-cache --remote_cache_compression=true
 try-import %workspace%/.bazelrc.user
 
 # Differential Fuzzing Configuration
+build:fuzzer --config=clang
 build:fuzzer --copt=-fsanitize=fuzzer,address
 build:fuzzer --linkopt=-fsanitize=fuzzer,address
 build:fuzzer --copt=-fno-omit-frame-pointer
