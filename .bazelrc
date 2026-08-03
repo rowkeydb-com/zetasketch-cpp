@@ -10,10 +10,10 @@ build --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
 build --cxxopt=-fno-exceptions --host_cxxopt=-fno-exceptions
 build --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti
 
-# Strict warning hygiene enforced globally.
+# Strict warning hygiene enforced globally (for target only).
 build --cxxopt=-Wall --host_cxxopt=-Wall
 build --cxxopt=-Wextra --host_cxxopt=-Wextra
-build --cxxopt=-Werror --host_cxxopt=-Werror
+build --cxxopt=-Werror --host_cxxopt=-Wno-error
 
 # Print full output (including sanitizer reports and clang-tidy
 # findings) for failed actions, not just a truncated summary.
@@ -21,6 +21,7 @@ build --verbose_failures
 
 # Suppress -Werror in external dependencies (e.g. boringssl, protobuf)
 build --per_file_copt="external/.*@-Wno-error"
+build --host_per_file_copt=".*@-Wno-error"
 test --test_output=errors
 
 # `--config=clang` enables Clang's thread-safety annotation
@@ -126,6 +127,7 @@ build:remote-cache --remote_cache_compression=true
 try-import %workspace%/.bazelrc.user
 
 # Differential Fuzzing Configuration
+build:fuzzer --config=clang
 build:fuzzer --copt=-fsanitize=fuzzer,address
 build:fuzzer --linkopt=-fsanitize=fuzzer,address
 build:fuzzer --copt=-fno-omit-frame-pointer

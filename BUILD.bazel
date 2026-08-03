@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 filegroup(name="empty")
 
 filegroup(
@@ -10,4 +12,16 @@ filegroup(
     name = "clang_tidy_analyzer_config",
     srcs = [".clang-tidy"], # Will use same config for now
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "zetasketch-cpp",
+    srcs = [],
+    hdrs = [],
+    copts = ["-std=c++23"],
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@protobuf//:protobuf",
+    ],
 )
