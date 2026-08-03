@@ -1,0 +1,85 @@
+name: Static Analysis
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  static-analysis:
+    name: Static analysis - ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CI Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/Dockerfile.ci
+          tags: zetasketch-cpp-ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: Execute clang-tidy static analysis
+        run: .github/scripts/run-bazel-in-docker.sh clang-tidy build
+
+      - name: Generate CTU External Definition Mapping Index
+        run: |
+          docker run --rm -v "$PWD":/workspace --user "$(id -u):$(id -g)" \
+            -w /workspace zetasketch-cpp-ci bash -c '
+              if [ -f compile_commands.json ]; then
+                grep -o "\"file\": \"[^\"]*\"" compile_commands.json | cut -d\" -f4 | sort -u > ctu_sources.txt
+                if [ -s ctu_sources.txt ]; then
+                  xargs -a ctu_sources.txt clang-extdef-mapping -p . > externalDefMap.txt
+                  echo "aW1wb3J0IGpzb24KaW1wb3J0IHN1YnByb2Nlc3MKaW1wb3J0IHN5cwppbXBvcnQgc2hsZXgKCnRyeToKICAgIHdpdGggb3BlbigiY29tcGlsZV9jb21tYW5kcy5qc29uIikgYXMgZjoKICAgICAgICBkYiA9IGpzb24ubG9hZChmKQpleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICBwcmludCgiRmFpbGVkIHRvIHJlYWQgY29tcGlsZV9jb21tYW5kcy5qc29uOiIsIGUpCiAgICBzeXMuZXhpdCgxKQoKZmFpbGVkID0gRmFsc2UKZm9yIGVudHJ5IGluIGRiOgogICAgdHJ5OgogICAgICAgIGZpbGUgPSBlbnRyeS5nZXQoImZpbGUiKQogICAgICAgIGlmIG5vdCBmaWxlOgogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmICJhcmd1bWVudHMiIGluIGVudHJ5OgogICAgICAgICAgICBjbWRfYXJncyA9IGVudHJ5WyJhcmd1bWVudHMiXQogICAgICAgIGVsaWYgImNvbW1hbmQiIGluIGVudHJ5OgogICAgICAgICAgICBjbWRfYXJncyA9IHNobGV4LnNwbGl0KGVudHJ5WyJjb21tYW5kIl0pCiAgICAgICAgZWxzZToKICAgICAgICAgICAgcHJpbnQoIk5vIGNvbW1hbmQgb3IgYXJndW1lbnRzIGZvdW5kIGZvciBmaWxlOiIsIGZpbGUpCiAgICAgICAgICAgIGZhaWxlZCA9IFRydWUKICAgICAgICAgICAgY29udGludWUKICAgICAgICBjbWRfYXJncy5leHRlbmQoWyItZW1pdC1hc3QiLCAiLW8iLCBmIntmaWxlfS5hc3QiXSkKICAgICAgICBzdWJwcm9jZXNzLnJ1bihjbWRfYXJncywgY2hlY2s9VHJ1ZSkKICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICBwcmludChmIkFTVCBnZW5lcmF0aW9uIGZhaWxlZCBmb3Ige2ZpbGV9OiIsIGUpCiAgICAgICAgZmFpbGVkID0gVHJ1ZQoKaWYgZmFpbGVkOgogICAgc3lzLmV4aXQoMSkK" | base64 -d > gen_ast.py
+                  python3 gen_ast.py
+                else
+                  touch externalDefMap.txt
+                fi
+              else
+                touch externalDefMap.txt
+              fi
+            '
+
+      - name: Execute clang-tidy path-sensitive analysis
+        run: .github/scripts/run-bazel-in-docker.sh clang-tidy-analyzer build
+
+      - name: Execute clang-format verification
+        run: |
+          docker run --rm -v "$PWD":/workspace --user "$(id -u):$(id -g)" \
+            -w /workspace zetasketch-cpp-ci bash -c '
+              find . \( -name "*.cc" -o -name "*.h" -o -name "*.cxx" -o -name "*.hxx" \) \
+                  -not -path "*/external/*" \
+                  -not -path "*/bazel-*/*" \
+                  -not -path "*/.cache/*" \
+                  -print0 \
+                | xargs -0 -r clang-format --dry-run --Werror
+            '
+
+      - name: Execute shellcheck verification
+        run: |
+          docker run --rm -v "$PWD":/workspace --user "$(id -u):$(id -g)" \
+            -w /workspace zetasketch-cpp-ci bash -c '
+              find .github/scripts -name "*.sh" -print0 | xargs -0 -r shellcheck
+            '
+
+      - name: Execute actionlint verification
+        uses: reviewdog/action-actionlint@v1
+        with:
+          fail_level: error

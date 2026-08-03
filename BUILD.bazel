@@ -1,0 +1,13 @@
+filegroup(name="empty")
+
+filegroup(
+    name = "clang_tidy_config",
+    srcs = [".clang-tidy"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "clang_tidy_analyzer_config",
+    srcs = [".clang-tidy"], # Will use same config for now
+    visibility = ["//visibility:public"],
+)

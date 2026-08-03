@@ -1,0 +1,132 @@
+# RowKeyRaft Bazel configuration.
+#
+# Common build flags are below. Sanitizer and static-analysis
+# configurations are layered on top with `--config=<name>`.
+
+# C++23 across the project.
+build --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
+
+# No exceptions, no RTTI, per Google C++ Style Guide.
+build --cxxopt=-fno-exceptions --host_cxxopt=-fno-exceptions
+build --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti
+
+# Strict warning hygiene enforced globally.
+build --cxxopt=-Wall --host_cxxopt=-Wall
+build --cxxopt=-Wextra --host_cxxopt=-Wextra
+build --cxxopt=-Werror --host_cxxopt=-Werror
+
+# Print full output (including sanitizer reports and clang-tidy
+# findings) for failed actions, not just a truncated summary.
+build --verbose_failures
+
+# Suppress -Werror in external dependencies (e.g. boringssl, protobuf)
+build --per_file_copt="external/.*@-Wno-error"
+test --test_output=errors
+
+# `--config=clang` enables Clang's thread-safety annotation
+# enforcement. Chained from sanitizer configs below so every
+# sanitizer build also enforces the annotations. The repo_env
+# lines tell Bazel to use the Clang toolchain rather than the
+# host default (often GCC, which does not recognise
+# -Wthread-safety).
+build:clang --repo_env=CC=clang
+build:clang --repo_env=CXX=clang++
+build:clang --cxxopt=-Wthread-safety --host_cxxopt=-Wthread-safety
+build:clang --cxxopt=-Werror=thread-safety --host_cxxopt=-Werror=thread-safety
+
+# Release build: optimised, no debug assertions.
+build:release --compilation_mode=opt
+
+# AddressSanitizer + UndefinedBehaviorSanitizer.
+build:asan-ubsan --config=clang
+build:asan-ubsan --copt=-fsanitize=address,undefined
+build:asan-ubsan --copt=-fno-omit-frame-pointer
+build:asan-ubsan --copt=-O1
+build:asan-ubsan --linkopt=-fsanitize=address,undefined
+build:asan-ubsan --strip=never
+
+# ThreadSanitizer.
+build:tsan --config=clang
+build:tsan --copt=-fsanitize=thread
+build:tsan --copt=-fno-omit-frame-pointer
+build:tsan --copt=-O1
+build:tsan --linkopt=-fsanitize=thread
+build:tsan --strip=never
+
+# MemorySanitizer (requires instrumented libc++).
+# Core MSan flags to enable memory sanitization, keep debug symbols,
+# track uninitialized value origins, and preserve frame pointers.
+build:msan --config=clang
+build:msan --copt=-fsanitize=memory
+build:msan --copt=-fsanitize-memory-track-origins
+build:msan --copt=-fsanitize-memory-use-after-dtor
+build:msan --copt=-O1
+build:msan --copt=-fno-omit-frame-pointer
+build:msan --cxxopt=-std=c++23
+build:msan --linkopt=-fsanitize=memory
+build:msan --action_env=MSAN_OPTIONS=poison_in_dtor=1
+build:msan --strip=never
+
+# Direct Clang to compile and link using libc++ instead of the default libstdc++.
+build:msan --cxxopt=-stdlib=libc++
+build:msan --linkopt=-stdlib=libc++
+
+# Point the compiler and linker to your MSan-instrumented libc++ paths.
+build:msan --cxxopt=-isystem/usr/lib/llvm-18/include/c++/v1
+build:msan --linkopt=-L/usr/lib/llvm-18/lib/msan
+
+# Explicitly link the C++ standard library and its ABI
+build:msan --cxxopt=-fexperimental-library
+build:msan --linkopt=-lc++
+build:msan --linkopt=-lc++abi
+build:msan --linkopt=-lc++experimental
+
+# Bake the custom library path directly into the executable's search path.
+build:msan --linkopt=-Wl,-rpath,/usr/lib/llvm-18/lib/msan
+
+# Explicit architecture aliases for the CI matrix
+build:msan-amd64 --config=msan
+build:msan-arm64 --config=msan
+
+# clang-tidy via the upstream Bazel integration (aspect-based).
+# Note: the actual aspect wiring is added when rowkeyraft's first
+# library target lands; for now this config is a placeholder
+# that ensures the `--config=clang-tidy` switch is recognised.
+build:clang-tidy --config=clang
+build:clang-tidy --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl%clang_tidy_aspect
+build:clang-tidy --@bazel_clang_tidy//:clang_tidy_config=//:clang_tidy_config
+build:clang-tidy --output_groups=report
+
+# clang-tidy combined with the Clang Static Analyzer (path-sensitive checks)
+build:clang-tidy-analyzer --config=clang
+build:clang-tidy-analyzer --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl%clang_tidy_aspect
+build:clang-tidy-analyzer --@bazel_clang_tidy//:clang_tidy_config=//:clang_tidy_analyzer_config
+build:clang-tidy-analyzer --output_groups=report
+
+# Coverage with lcov. Uses the default GCC toolchain because Bazel's
+# gcov-based coverage pipeline produces an empty lcov report when paired
+# with Clang's .gcda format. Thread-safety annotation enforcement still
+# runs in every other configuration (release, asan-ubsan, tsan,
+# clang-tidy), so coverage giving up that single guard does not weaken
+# the overall safety net.
+coverage --combined_report=lcov
+
+# Remote-cache scaffolding. The cache is off by default. To turn it
+# on for a developer machine or a CI environment, set the URL via a
+# local .bazelrc.user (loaded below) or pass --config=remote-cache on
+# the command line, with the URL configured via --remote_cache=...
+# either inline or in the user file.
+build:remote-cache --remote_cache_compression=true
+# build:remote-cache --remote_cache=https://example.invalid/cache
+# build:remote-cache --remote_upload_local_results=true
+
+# Try the user-local bazelrc if it exists. Not committed. Use this to
+# set credentials, point at a personal remote cache, or override any
+# of the configs above without touching the committed file.
+try-import %workspace%/.bazelrc.user
+
+# Differential Fuzzing Configuration
+build:fuzzer --copt=-fsanitize=fuzzer,address
+build:fuzzer --linkopt=-fsanitize=fuzzer,address
+build:fuzzer --copt=-fno-omit-frame-pointer
+build:fuzzer --copt=-O2

@@ -1,0 +1,41 @@
+name: Differential Fuzzing
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  fuzzing:
+    name: Differential Fuzzing - ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CI Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/Dockerfile.ci
+          tags: zetasketch-cpp-ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+
+      - name: Execute differential fuzzing regimen
+        run: .github/scripts/run-bazel-in-docker.sh fuzzer test
