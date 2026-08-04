@@ -18,10 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         config: [asan-ubsan, tsan]
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             config: msan-amd64
           - os: ubuntu-24.04-arm
             config: msan-arm64
