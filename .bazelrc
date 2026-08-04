@@ -128,7 +128,7 @@ try-import %workspace%/.bazelrc.user
 
 # Differential Fuzzing Configuration
 build:fuzzer --config=clang
-build:fuzzer --copt=-fsanitize=fuzzer,address
-build:fuzzer --linkopt=-fsanitize=fuzzer,address
+build:fuzzer --copt=-fsanitize=fuzzer-no-link,address
+build:fuzzer --linkopt=-fsanitize=fuzzer-no-link,address
 build:fuzzer --copt=-fno-omit-frame-pointer
 build:fuzzer --copt=-O2

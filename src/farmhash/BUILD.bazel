@@ -1,0 +1,10 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "farmhash",
+    srcs = ["farmhash.cc"],
+    hdrs = ["farmhash.h"],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+    copts = ["-Wno-error"],
+)
