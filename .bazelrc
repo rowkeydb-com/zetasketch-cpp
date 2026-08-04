@@ -14,13 +14,16 @@ build --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti
 build --cxxopt=-Wall --host_cxxopt=-Wall
 build --cxxopt=-Wextra --host_cxxopt=-Wextra
 build --cxxopt=-Werror --host_cxxopt=-Wno-error
+build --cxxopt=-Wno-deprecated-builtins --host_cxxopt=-Wno-deprecated-builtins
 
 # Print full output (including sanitizer reports and clang-tidy
 # findings) for failed actions, not just a truncated summary.
 build --verbose_failures
 
 # Suppress -Werror in external dependencies (e.g. boringssl, protobuf)
+# and generated protobuf code.
 build --per_file_copt="external/.*@-Wno-error"
+build --per_file_copt="src/proto/.*@-Wno-error"
 build --host_per_file_copt=".*@-Wno-error"
 test --test_output=errors
 
@@ -44,6 +47,7 @@ build:asan-ubsan --copt=-fsanitize=address,undefined
 build:asan-ubsan --copt=-fno-omit-frame-pointer
 build:asan-ubsan --copt=-O1
 build:asan-ubsan --linkopt=-fsanitize=address,undefined
+build:asan-ubsan --linkopt=-rtlib=compiler-rt
 build:asan-ubsan --strip=never
 
 # ThreadSanitizer.
@@ -52,6 +56,7 @@ build:tsan --copt=-fsanitize=thread
 build:tsan --copt=-fno-omit-frame-pointer
 build:tsan --copt=-O1
 build:tsan --linkopt=-fsanitize=thread
+build:tsan --linkopt=-rtlib=compiler-rt
 build:tsan --strip=never
 
 # MemorySanitizer (requires instrumented libc++).
@@ -65,7 +70,9 @@ build:msan --copt=-O1
 build:msan --copt=-fno-omit-frame-pointer
 build:msan --cxxopt=-std=c++23
 build:msan --linkopt=-fsanitize=memory
+build:msan --linkopt=-rtlib=compiler-rt
 build:msan --action_env=MSAN_OPTIONS=poison_in_dtor=1
+build:msan --cxxopt=-Wno-deprecated-declarations
 build:msan --strip=never
 
 # Direct Clang to compile and link using libc++ instead of the default libstdc++.
@@ -130,5 +137,6 @@ try-import %workspace%/.bazelrc.user
 build:fuzzer --config=clang
 build:fuzzer --copt=-fsanitize=fuzzer-no-link,address
 build:fuzzer --linkopt=-fsanitize=fuzzer-no-link,address
+build:fuzzer --linkopt=-rtlib=compiler-rt
 build:fuzzer --copt=-fno-omit-frame-pointer
 build:fuzzer --copt=-O2

@@ -8,3 +8,12 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "proto_test",
+    srcs = ["proto_test.cpp"],
+    deps = [
+        "//src/proto:zetasketch_cc_proto",
+        "@googletest//:gtest_main",
+    ],
+)

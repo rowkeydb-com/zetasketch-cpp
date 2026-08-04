@@ -1,0 +1,21 @@
+package(default_visibility = ["//visibility:public"])
+
+proto_library(
+    name = "zetasketch_proto",
+    srcs = [
+        "aggregator.proto",
+        "annotation.proto",
+        "custom-value-type.proto",
+        "hllplusplus.proto",
+        "unique-stats.proto",
+    ],
+    deps = [
+        "@protobuf//:descriptor_proto",
+    ],
+    strip_import_prefix = "",
+)
+
+cc_proto_library(
+    name = "zetasketch_cc_proto",
+    deps = [":zetasketch_proto"],
+)
