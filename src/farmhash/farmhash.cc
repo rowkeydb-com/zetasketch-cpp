@@ -1978,9 +1978,9 @@ uint128_t Fingerprint128(const char* s, size_t len) {
 
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -2924,9 +2924,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -3249,9 +3249,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -3899,9 +3899,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -4224,9 +4224,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -4549,9 +4549,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -4874,9 +4874,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -5524,9 +5524,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;
@@ -6020,9 +6020,9 @@ int main(int argc, char** argv) {
 #endif
 #ifndef FARMHASH_SELF_TEST_GUARD
 #define FARMHASH_SELF_TEST_GUARD
+#include <string.h>
 #include <cstdio>
 #include <iostream>
-#include <string.h>
 
 using std::cerr;
 using std::cout;

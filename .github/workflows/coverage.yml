@@ -15,7 +15,7 @@ jobs:
     name: Coverage - ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
 
@@ -40,10 +40,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .bazel-cache
-          key: bazel-cache-${{ runner.os }}-${{ github.workflow }}-${{ github.sha }}
+          key: bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ github.workflow }}-${{ github.sha }}
           restore-keys: |
-            bazel-cache-${{ runner.os }}-${{ github.workflow }}-
-            bazel-cache-${{ runner.os }}-
+            bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ github.workflow }}-
+            bazel-cache-${{ runner.os }}-${{ matrix.os }}-
 
       - name: Ensure Bazel cache directory exists
         run: mkdir -p .bazel-cache
@@ -71,7 +71,7 @@ jobs:
           fi
 
       - name: Upload to Codecov
-        if: ${{ hashFiles('coverage.lcov') != '' && matrix.os == 'ubuntu-latest' }}
+        if: ${{ hashFiles('coverage.lcov') != '' && matrix.os == 'ubuntu-24.04' }}
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

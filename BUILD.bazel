@@ -20,11 +20,18 @@ cc_library(
     hdrs = [
         "include/zetasketch/bias_data.h",
         "include/zetasketch/core_constants.h",
+        "include/zetasketch/utils/var_int.h",
+        "include/zetasketch/utils/buffer_traits.h",
+        "include/zetasketch/hll/state.h",
+        "include/zetasketch/hll/representation.h",
+        "include/zetasketch/hll/encoding.h",
+        "include/zetasketch/hyperloglogplusplus.h",
     ],
     copts = ["-std=c++23"],
     includes = ["include"],
     visibility = ["//visibility:public"],
     deps = [
         "@protobuf//:protobuf",
+        "//src/proto:zetasketch_cc_proto",
     ],
 )

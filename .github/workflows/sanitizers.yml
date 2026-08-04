@@ -18,10 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         config: [asan-ubsan, tsan]
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             config: msan-amd64
           - os: ubuntu-24.04-arm
             config: msan-arm64
@@ -48,10 +48,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .bazel-cache
-          key: bazel-cache-${{ runner.os }}-${{ github.workflow }}-${{ github.sha }}
+          key: bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ matrix.config }}-${{ github.workflow }}-${{ github.sha }}
           restore-keys: |
-            bazel-cache-${{ runner.os }}-${{ github.workflow }}-
-            bazel-cache-${{ runner.os }}-
+            bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ matrix.config }}-${{ github.workflow }}-
+            bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ matrix.config }}-
+            bazel-cache-${{ runner.os }}-${{ matrix.os }}-
 
       - name: Ensure Bazel cache directory exists
         run: mkdir -p .bazel-cache

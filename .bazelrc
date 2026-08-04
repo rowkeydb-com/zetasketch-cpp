@@ -38,6 +38,8 @@ build:clang --repo_env=CC=clang
 build:clang --repo_env=CXX=clang++
 build:clang --cxxopt=-Wthread-safety --host_cxxopt=-Wthread-safety
 build:clang --cxxopt=-Werror=thread-safety --host_cxxopt=-Werror=thread-safety
+# Clang 18 on Ubuntu 24.04 defines __cpp_concepts=201907L which breaks libstdc++'s <expected>
+build:clang --cxxopt=-D__cpp_concepts=202002L --host_cxxopt=-D__cpp_concepts=202002L
 
 # Release build: optimised, no debug assertions.
 build:release --compilation_mode=opt
