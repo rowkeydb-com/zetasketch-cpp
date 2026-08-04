@@ -37,5 +37,17 @@ jobs:
           cache-to: type=gha,mode=min
 
 
+      - name: Cache Bazel state
+        uses: actions/cache@v4
+        with:
+          path: .bazel-cache
+          key: bazel-cache-${{ runner.os }}-${{ github.workflow }}-${{ github.sha }}
+          restore-keys: |
+            bazel-cache-${{ runner.os }}-${{ github.workflow }}-
+            bazel-cache-${{ runner.os }}-
+
+      - name: Ensure Bazel cache directory exists
+        run: mkdir -p .bazel-cache
+
       - name: Execute differential fuzzing regimen
         run: .github/scripts/run-bazel-in-docker.sh fuzzer test

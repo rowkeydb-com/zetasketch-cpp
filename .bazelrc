@@ -10,21 +10,22 @@ build --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
 build --cxxopt=-fno-exceptions --host_cxxopt=-fno-exceptions
 build --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti
 
-# Strict warning hygiene enforced globally (for target only).
+# Strict warning hygiene enforced globally for both target and host platforms.
 build --cxxopt=-Wall --host_cxxopt=-Wall
 build --cxxopt=-Wextra --host_cxxopt=-Wextra
-build --cxxopt=-Werror --host_cxxopt=-Wno-error
+build --cxxopt=-Werror --host_cxxopt=-Werror
 build --cxxopt=-Wno-deprecated-builtins --host_cxxopt=-Wno-deprecated-builtins
 
 # Print full output (including sanitizer reports and clang-tidy
 # findings) for failed actions, not just a truncated summary.
 build --verbose_failures
 
-# Suppress -Werror in external dependencies (e.g. boringssl, protobuf)
-# and generated protobuf code.
-build --per_file_copt="external/.*@-Wno-error"
-build --per_file_copt="src/proto/.*@-Wno-error"
-build --host_per_file_copt=".*@-Wno-error"
+# Inhibit all warnings in external dependencies (e.g. boringssl, protobuf)
+# and generated protobuf code to eliminate CI console noise.
+build --per_file_copt="external/.*@-w"
+build --per_file_copt="src/proto/.*@-w"
+build --host_per_file_copt="external/.*@-w"
+build --host_per_file_copt="src/proto/.*@-w"
 test --test_output=errors
 
 # `--config=clang` enables Clang's thread-safety annotation

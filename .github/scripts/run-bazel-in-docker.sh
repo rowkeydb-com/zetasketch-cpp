@@ -79,9 +79,11 @@ DOCKER_OPTS+=(--user "$(id -u):$(id -g)")
 DOCKER_OPTS+=(-e HOME=/tmp)
 DOCKER_OPTS+=(-e USER=zetasketch-cpp)
 DOCKER_OPTS+=(-v "$WORKSPACE_DIR:/workspace")
+DOCKER_OPTS+=(-v "$WORKSPACE_DIR/.bazel-cache:/tmp/bazel-cache")
 DOCKER_OPTS+=(-w /workspace)
 
 BAZEL_OPTS=()
+BAZEL_OPTS+=(--disk_cache=/tmp/bazel-cache --repository_cache=/tmp/bazel-cache/repos)
 if [ -n "${BAZEL_REMOTE_CACHE:-}" ]; then
     BAZEL_OPTS+=(--remote_cache="$BAZEL_REMOTE_CACHE" --remote_upload_local_results=true)
     DOCKER_OPTS+=(--add-host=host.docker.internal:host-gateway)
