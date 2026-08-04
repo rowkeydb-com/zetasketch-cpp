@@ -16,7 +16,10 @@ filegroup(
 
 cc_library(
     name = "zetasketch-cpp",
-    srcs = [],
+    srcs = [
+        "src/hll/math_utils.cc",
+        "src/hll/normal_representation.cc",
+    ],
     hdrs = [
         "include/zetasketch/bias_data.h",
         "include/zetasketch/core_constants.h",
@@ -25,6 +28,8 @@ cc_library(
         "include/zetasketch/hll/state.h",
         "include/zetasketch/hll/representation.h",
         "include/zetasketch/hll/encoding.h",
+        "include/zetasketch/hll/math_utils.h",
+        "include/zetasketch/hll/normal_representation.h",
         "include/zetasketch/hyperloglogplusplus.h",
     ],
     copts = ["-std=c++23"],

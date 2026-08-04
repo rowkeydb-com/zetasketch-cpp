@@ -26,3 +26,21 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "math_utils_test",
+    srcs = ["hll/math_utils_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "normal_representation_test",
+    srcs = ["hll/normal_representation_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)

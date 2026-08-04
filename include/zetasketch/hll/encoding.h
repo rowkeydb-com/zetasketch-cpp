@@ -195,6 +195,9 @@ class Sparse {
 
   [[nodiscard]] Normal normal() const { return normal_encoder_; }
 
+  [[nodiscard]] int32_t normal_precision() const { return normal_precision_; }
+  [[nodiscard]] int32_t sparse_precision() const { return sparse_precision_; }
+
  private:
   Sparse(int32_t normal_precision, int32_t sparse_precision,
          uint32_t rho_encoded_flag, Normal normal_encoder)
