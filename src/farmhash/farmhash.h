@@ -44,11 +44,11 @@
 #ifndef FARM_HASH_H_
 #define FARM_HASH_H_
 
-#include <utility>
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>  // for memcpy and memset
+#include <utility>
 
 #ifndef NAMESPACE_FOR_HASH_FUNCTIONS
 #define NAMESPACE_FOR_HASH_FUNCTIONS util

@@ -1,4 +1,4 @@
-# clang-format configuration for rowkeyraft.
+# clang-format configuration for zetasketch-cpp.
 #
 # We follow the Google C++ Style Guide as the base. The few overrides
 # below are deliberate project conventions.
@@ -18,19 +18,18 @@ QualifierAlignment: Left
 IncludeBlocks: Merge
 
 IncludeCategories:
-  # Project headers come first.
-  - Regex: '^"rowkeyraft/'
+  # C system headers
+  - Regex: '^<[A-Za-z0-9_]*\.h>$'
     Priority: 1
-  # Other quoted includes (rare; would be unusual third-party).
-  - Regex: '^"'
+  # C++ standard library headers
+  - Regex: '^<[a-z_]+>$'
     Priority: 2
-  # Library headers via <> with a path component
-  # (abseil, opentelemetry, grpc, etc.).
+  # Third-party libraries
   - Regex: '^<.*/.*'
     Priority: 3
-  # C++ standard library headers like <vector>, <string>.
-  - Regex: '^<[a-z_]+>$'
+  # Other quoted includes (e.g. aggregator.pb.h)
+  - Regex: '^"[^/]+\.h"'
     Priority: 4
-  # C-style system headers like <unistd.h>, <sys/socket.h>.
-  - Regex: '^<[A-Za-z0-9_/]*\.h>$'
+  # Project headers (zetasketch)
+  - Regex: '^"zetasketch/'
     Priority: 5
