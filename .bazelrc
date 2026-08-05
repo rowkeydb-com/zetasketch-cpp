@@ -121,7 +121,8 @@ build:clang-tidy-analyzer --output_groups=report
 # clang-tidy), so coverage giving up that single guard does not weaken
 # the overall safety net.
 coverage --combined_report=lcov
-coverage --instrumentation_filter="^//"
+coverage --instrumentation_filter="^//src|^//include"
+coverage --instrument_test_targets=false
 
 # Remote-cache scaffolding. The cache is off by default. To turn it
 # on for a developer machine or a CI environment, set the URL via a
