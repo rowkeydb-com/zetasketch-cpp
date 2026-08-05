@@ -30,7 +30,7 @@ SparseRepresentation::SparseRepresentation(State state,
       encoding_(std::move(encoding)),
       max_sparse_data_bytes_(max_sparse_data_bytes),
       max_buffer_elements_(max_buffer_elements) {
-  buffer_.reserve(max_buffer_elements_);
+  buffer_.reserve(max_buffer_elements_ + 1);
 }
 
 std::expected<SparseRepresentation, utils::Error> SparseRepresentation::Create(
@@ -149,8 +149,9 @@ std::expected<void, utils::Error> SparseRepresentation::FlushBuffer() {
   scratch_sparse_data_ = std::move(encoder).IntoVec();
   if (state_.sparse_data.has_value()) {
     std::swap(state_.sparse_data.value(), scratch_sparse_data_);
+    scratch_sparse_data_.clear();
   } else {
-    state_.sparse_data = scratch_sparse_data_;
+    state_.sparse_data = std::move(scratch_sparse_data_);
   }
   state_.sparse_size = new_sparse_size;
   buffer_.clear();
@@ -169,7 +170,7 @@ SparseRepresentation::UpdateRepresentation() && {
   bool should_normalize = false;
   if (state_.sparse_data.has_value()) {
     should_normalize =
-        state_.sparse_data.value().size() > max_sparse_data_bytes_;
+        state_.sparse_data.value().size() >= max_sparse_data_bytes_;
   }
 
   if (should_normalize) {
@@ -180,14 +181,19 @@ SparseRepresentation::UpdateRepresentation() && {
 
 std::expected<Representation, utils::Error>
 SparseRepresentation::Normalize() && {
-  auto normal_res = NormalRepresentation::Create(state_);
+  std::optional<std::vector<uint8_t>> extracted_sparse_data = std::nullopt;
+  if (state_.sparse_data.has_value()) {
+    extracted_sparse_data = std::move(state_.sparse_data.value());
+  }
+  auto normal_res = NormalRepresentation::Create(std::move(state_));
   if (!normal_res.has_value()) {
     return std::unexpected(normal_res.error());
   }
   NormalRepresentation normal_repr = std::move(*normal_res);
 
-  if (state_.sparse_data.has_value() && !state_.sparse_data.value().empty()) {
-    utils::DifferenceDecoder decoder(state_.sparse_data.value());
+  if (extracted_sparse_data.has_value() &&
+      !extracted_sparse_data.value().empty()) {
+    utils::DifferenceDecoder decoder(extracted_sparse_data.value());
     while (true) {
       auto val_opt = decoder.Next();
       if (!val_opt.has_value()) {

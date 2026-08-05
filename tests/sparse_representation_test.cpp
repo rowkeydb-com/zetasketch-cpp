@@ -117,11 +117,14 @@ TEST(SparseRepresentationTest, SparseToDenseTransitionExactBoundaryN) {
 
   auto hash_res = std::move(repr).AddHash(0x123456789ABCDEF0);
   ASSERT_TRUE(hash_res.has_value());
-  const Representation repr_union = std::move(hash_res.value());
+  auto repr_union = std::move(hash_res.value());
 
-  // It shouldn't transition yet, because buffer_.size() == 1, which is <= 256
-  // and sparse_data is 768, which is <= 768.
-  ASSERT_TRUE(std::holds_alternative<SparseRepresentation>(repr_union));
+  // It SHOULD transition now, because sparse_data is 768, which is >= 768.
+  ASSERT_TRUE(std::holds_alternative<NormalRepresentation>(repr_union));
+  const auto& normal_repr = std::get<NormalRepresentation>(repr_union);
+  auto est = normal_repr.Estimate();
+  ASSERT_TRUE(est.has_value());
+  EXPECT_GT(est.value(), 0);
 }
 
 TEST(SparseRepresentationTest, SparseToDenseTransitionExactBoundaryNPlus1) {
@@ -137,10 +140,14 @@ TEST(SparseRepresentationTest, SparseToDenseTransitionExactBoundaryNPlus1) {
 
   auto hash_res = std::move(repr).AddHash(0x123456789ABCDEF0);
   ASSERT_TRUE(hash_res.has_value());
-  const Representation repr_union = std::move(hash_res.value());
+  auto repr_union = std::move(hash_res.value());
 
-  // It SHOULD transition now, because sparse_data is 769, which is > 768.
+  // It SHOULD transition now, because sparse_data is 769, which is >= 768.
   ASSERT_TRUE(std::holds_alternative<NormalRepresentation>(repr_union));
+  const auto& normal_repr = std::get<NormalRepresentation>(repr_union);
+  auto est = normal_repr.Estimate();
+  ASSERT_TRUE(est.has_value());
+  EXPECT_GT(est.value(), 0);
 }
 
 }  // namespace
