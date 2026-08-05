@@ -44,3 +44,21 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "iterators_test",
+    srcs = ["iterators_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "sparse_representation_test",
+    srcs = ["sparse_representation_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)

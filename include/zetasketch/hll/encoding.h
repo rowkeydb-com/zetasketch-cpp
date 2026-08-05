@@ -193,6 +193,21 @@ class Sparse {
                                 (sparse_precision_ - normal_precision_));
   }
 
+  [[nodiscard]] uint32_t DowngradeSparseValue(uint32_t sparse_value,
+                                              const Sparse& target) const {
+    const uint32_t old_sparse_index = DecodeSparseIndex(sparse_value);
+    const uint8_t old_sparse_rho_w = DecodeSparseRhoWIfPresent(sparse_value);
+
+    const uint32_t new_sparse_index =
+        old_sparse_index >>
+        static_cast<uint32_t>(sparse_precision_ - target.sparse_precision());
+    const uint8_t new_sparse_rho_w =
+        DowngradeRhoW(old_sparse_index, old_sparse_rho_w, sparse_precision_,
+                      target.sparse_precision());
+
+    return target.EncodeParts(new_sparse_index, new_sparse_rho_w);
+  }
+
   [[nodiscard]] Normal normal() const { return normal_encoder_; }
 
   [[nodiscard]] int32_t normal_precision() const { return normal_precision_; }

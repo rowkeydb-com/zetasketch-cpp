@@ -62,6 +62,11 @@ class BufferWriter {
   explicit BufferWriter(std::vector<uint8_t>& out_buffer)
       : data_(&out_buffer) {}
 
+  explicit BufferWriter(std::vector<uint8_t>&& out_buffer)
+      : local_buffer_(std::move(out_buffer)), data_(&local_buffer_) {
+    data_->clear();
+  }
+
   void WriteVarInt(int32_t value) {
     const size_t size_needed = VarInt::Size(value);
     const size_t start_pos = data_->size();
