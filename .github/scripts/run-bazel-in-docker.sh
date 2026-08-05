@@ -33,8 +33,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <config> <command>" >&2
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <config> <command> [bazel_args...]" >&2
     echo "  config:  release | asan-ubsan | tsan | msan | clang-tidy | clang-tidy-analyzer | coverage | fuzzer" >&2
     echo "  command: build | test | coverage" >&2
     exit 1
@@ -42,6 +42,7 @@ fi
 
 CONFIG="$1"
 COMMAND="$2"
+shift 2
 
 case "$CONFIG" in
     release|asan-ubsan|tsan|msan-amd64|msan-arm64|clang-tidy|clang-tidy-analyzer|coverage|fuzzer) ;;
@@ -102,7 +103,7 @@ if [ "$COMMAND" = "coverage" ]; then
     # root in a single container invocation, so paths inside the
     # container (where Bazel's symlinks resolve) are valid.
     docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" bash -c "
-        bazel coverage ${BAZEL_OPTS[*]} //...
+        bazel coverage ${BAZEL_OPTS[*]} ${*:-} //...
         rc=\$?
         if [ \"\$rc\" -eq 0 ]; then
             cp \"\$(bazel info output_path)/_coverage/_coverage_report.dat\" \\
@@ -115,7 +116,7 @@ if [ "$COMMAND" = "coverage" ]; then
     "
 else
     docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" \
-        bazel "$COMMAND" "${BAZEL_OPTS[@]}" --config="$CONFIG" //...
+        bazel "$COMMAND" "${BAZEL_OPTS[@]}" --config="$CONFIG" "$@" //...
 fi
 rc=$?
 set -e
