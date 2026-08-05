@@ -122,6 +122,11 @@ build:clang-tidy-analyzer --output_groups=report
 # the overall safety net.
 coverage --combined_report=lcov
 coverage --instrumentation_filter="^//src|^//include"
+# Do not run tests in the coverage pipeline using cached results.
+# Bazel has a known remote caching bug (issue #14498) where `coverage.dat` files
+# are NOT restored from the disk cache when a test action hits the cache.
+# This results in an empty coverage report if tests were previously cached.
+coverage --nocache_test_results
 coverage --instrument_test_targets=false
 
 # Remote-cache scaffolding. The cache is off by default. To turn it
