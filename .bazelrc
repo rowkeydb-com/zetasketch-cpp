@@ -10,21 +10,22 @@ build --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
 build --cxxopt=-fno-exceptions --host_cxxopt=-fno-exceptions
 build --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti
 
-# Strict warning hygiene enforced globally (for target only).
+# Strict warning hygiene enforced globally for both target and host platforms.
 build --cxxopt=-Wall --host_cxxopt=-Wall
 build --cxxopt=-Wextra --host_cxxopt=-Wextra
-build --cxxopt=-Werror --host_cxxopt=-Wno-error
+build --cxxopt=-Werror --host_cxxopt=-Werror
 build --cxxopt=-Wno-deprecated-builtins --host_cxxopt=-Wno-deprecated-builtins
 
 # Print full output (including sanitizer reports and clang-tidy
 # findings) for failed actions, not just a truncated summary.
 build --verbose_failures
 
-# Suppress -Werror in external dependencies (e.g. boringssl, protobuf)
-# and generated protobuf code.
-build --per_file_copt="external/.*@-Wno-error"
-build --per_file_copt="src/proto/.*@-Wno-error"
-build --host_per_file_copt=".*@-Wno-error"
+# Inhibit all warnings in external dependencies (e.g. boringssl, protobuf)
+# and generated protobuf code to eliminate CI console noise.
+build --per_file_copt="external/.*@-w"
+build --per_file_copt="src/proto/.*@-w"
+build --host_per_file_copt="external/.*@-w"
+build --host_per_file_copt="src/proto/.*@-w"
 test --test_output=errors
 
 # `--config=clang` enables Clang's thread-safety annotation
@@ -37,6 +38,8 @@ build:clang --repo_env=CC=clang
 build:clang --repo_env=CXX=clang++
 build:clang --cxxopt=-Wthread-safety --host_cxxopt=-Wthread-safety
 build:clang --cxxopt=-Werror=thread-safety --host_cxxopt=-Werror=thread-safety
+# Clang 18 on Ubuntu 24.04 defines __cpp_concepts=201907L which breaks libstdc++'s <expected>
+build:clang --cxxopt=-D__cpp_concepts=202002L --host_cxxopt=-D__cpp_concepts=202002L
 
 # Release build: optimised, no debug assertions.
 build:release --compilation_mode=opt
@@ -118,6 +121,8 @@ build:clang-tidy-analyzer --output_groups=report
 # clang-tidy), so coverage giving up that single guard does not weaken
 # the overall safety net.
 coverage --combined_report=lcov
+coverage --instrumentation_filter="^//[^/]*:.*$"
+coverage --instrument_test_targets=false
 
 # Remote-cache scaffolding. The cache is off by default. To turn it
 # on for a developer machine or a CI environment, set the URL via a
