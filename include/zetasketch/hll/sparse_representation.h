@@ -68,6 +68,9 @@ class SparseRepresentation {
   [[nodiscard]] std::expected<Representation, utils::Error>
   UpdateRepresentation() &&;
 
+  // Converts this sparse representation to a normal representation.
+  [[nodiscard]] std::expected<Representation, utils::Error> Normalize() &&;
+
   State state_;
   encoding::Sparse encoding_;
   size_t max_sparse_data_bytes_;

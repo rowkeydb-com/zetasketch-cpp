@@ -165,7 +165,45 @@ SparseRepresentation::UpdateRepresentation() && {
       return std::unexpected(res.error());
     }
   }
+
+  bool should_normalize = false;
+  if (state_.sparse_data.has_value()) {
+    should_normalize =
+        state_.sparse_data.value().size() > max_sparse_data_bytes_;
+  }
+
+  if (should_normalize) {
+    return std::move(*this).Normalize();
+  }
   return std::move(*this);
+}
+
+std::expected<Representation, utils::Error>
+SparseRepresentation::Normalize() && {
+  auto normal_res = NormalRepresentation::Create(state_);
+  if (!normal_res.has_value()) {
+    return std::unexpected(normal_res.error());
+  }
+  NormalRepresentation normal_repr = std::move(*normal_res);
+
+  if (state_.sparse_data.has_value() && !state_.sparse_data.value().empty()) {
+    utils::DifferenceDecoder decoder(state_.sparse_data.value());
+    while (true) {
+      auto val_opt = decoder.Next();
+      if (!val_opt.has_value()) {
+        break;
+      }
+      auto add_res = normal_repr.AddSparseValue(encoding_, *val_opt);
+      if (!add_res.has_value()) return std::unexpected(add_res.error());
+    }
+  }
+
+  for (const uint32_t val : buffer_) {
+    auto add_res = normal_repr.AddSparseValue(encoding_, val);
+    if (!add_res.has_value()) return std::unexpected(add_res.error());
+  }
+
+  return normal_repr;
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)

@@ -7,6 +7,7 @@
 #include <expected>
 #include <utility>
 #include <variant>
+#include <vector>
 #include <gtest/gtest.h>
 #include "zetasketch/hll/encoding.h"
 #include "zetasketch/hll/state.h"
@@ -81,6 +82,65 @@ TEST(SparseRepresentationTest, Estimate) {
   auto est = s_repr.Estimate();
   ASSERT_TRUE(est.has_value());
   EXPECT_GT(est.value(), 0);
+}
+
+TEST(SparseRepresentationTest, SparseToDenseTransitionExactBoundaryNMinus1) {
+  State state;
+  state.precision = 10;  // max_sparse_data_bytes_ = 1024 * 0.75 = 768
+  state.sparse_precision = 13;
+  // 767 bytes (N-1)
+  state.sparse_data = std::vector<uint8_t>(767, 0);
+
+  auto repr_res = SparseRepresentation::Create(std::move(state));
+  ASSERT_TRUE(repr_res.has_value());
+  auto repr = std::move(repr_res.value());
+
+  auto hash_res = std::move(repr).AddHash(0x123456789ABCDEF0);
+  ASSERT_TRUE(hash_res.has_value());
+  const Representation repr_union = std::move(hash_res.value());
+
+  // It shouldn't transition yet, because buffer_.size() == 1, which is <= 256
+  // and sparse_data is 767, which is <= 768.
+  ASSERT_TRUE(std::holds_alternative<SparseRepresentation>(repr_union));
+}
+
+TEST(SparseRepresentationTest, SparseToDenseTransitionExactBoundaryN) {
+  State state;
+  state.precision = 10;  // max_sparse_data_bytes_ = 1024 * 0.75 = 768
+  state.sparse_precision = 13;
+  // 768 bytes (N)
+  state.sparse_data = std::vector<uint8_t>(768, 0);
+
+  auto repr_res = SparseRepresentation::Create(std::move(state));
+  ASSERT_TRUE(repr_res.has_value());
+  auto repr = std::move(repr_res.value());
+
+  auto hash_res = std::move(repr).AddHash(0x123456789ABCDEF0);
+  ASSERT_TRUE(hash_res.has_value());
+  const Representation repr_union = std::move(hash_res.value());
+
+  // It shouldn't transition yet, because buffer_.size() == 1, which is <= 256
+  // and sparse_data is 768, which is <= 768.
+  ASSERT_TRUE(std::holds_alternative<SparseRepresentation>(repr_union));
+}
+
+TEST(SparseRepresentationTest, SparseToDenseTransitionExactBoundaryNPlus1) {
+  State state;
+  state.precision = 10;  // max_sparse_data_bytes_ = 1024 * 0.75 = 768
+  state.sparse_precision = 13;
+  // 769 bytes (N+1)
+  state.sparse_data = std::vector<uint8_t>(769, 0);
+
+  auto repr_res = SparseRepresentation::Create(std::move(state));
+  ASSERT_TRUE(repr_res.has_value());
+  auto repr = std::move(repr_res.value());
+
+  auto hash_res = std::move(repr).AddHash(0x123456789ABCDEF0);
+  ASSERT_TRUE(hash_res.has_value());
+  const Representation repr_union = std::move(hash_res.value());
+
+  // It SHOULD transition now, because sparse_data is 769, which is > 768.
+  ASSERT_TRUE(std::holds_alternative<NormalRepresentation>(repr_union));
 }
 
 }  // namespace
