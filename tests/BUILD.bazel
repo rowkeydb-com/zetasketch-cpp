@@ -19,8 +19,8 @@ cc_test(
 )
 
 cc_test(
-    name = "commit5_test",
-    srcs = ["commit5_test.cpp"],
+    name = "buffer_writer_test",
+    srcs = ["buffer_writer_test.cpp"],
     deps = [
         "//:zetasketch-cpp",
         "@googletest//:gtest_main",
