@@ -40,19 +40,19 @@ jobs:
           file: .github/Dockerfile.ci
           tags: zetasketch-cpp-ci
           load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
+          cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.os }}
+          cache-to: type=gha,mode=min,scope=${{ github.workflow }}-${{ matrix.os }}
 
 
       - name: Cache Bazel state
         uses: actions/cache@v4
         with:
           path: .bazel-cache
-          key: bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ matrix.config }}-${{ github.workflow }}-${{ github.sha }}
+          key: bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-${{ matrix.config }}-${{ github.workflow }}-${{ github.sha }}
           restore-keys: |
-            bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ matrix.config }}-${{ github.workflow }}-
-            bazel-cache-${{ runner.os }}-${{ matrix.os }}-${{ matrix.config }}-
-            bazel-cache-${{ runner.os }}-${{ matrix.os }}-
+            bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-${{ matrix.config }}-${{ github.workflow }}-
+            bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-${{ matrix.config }}-
+            bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-
 
       - name: Ensure Bazel cache directory exists
         run: mkdir -p .bazel-cache
@@ -63,6 +63,6 @@ jobs:
         run: |
           BAZEL_FLAGS=""
           if [ -n "$BUILDBUDDY_API_KEY" ]; then
-            BAZEL_FLAGS="--config=buildbuddy --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY"
+            BAZEL_FLAGS="--config=buildbuddy --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY --disk_cache="
           fi
           .github/scripts/run-bazel-in-docker.sh ${{ matrix.config }} test $BAZEL_FLAGS
