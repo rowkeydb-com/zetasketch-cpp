@@ -1,0 +1,147 @@
+// SPDX-FileCopyrightText: 2026 RowKeyDB
+//
+// SPDX-License-Identifier: Apache-2.0
+
+#include "zetasketch/hyperloglogplusplus.h"
+#include "zetasketch/hll/encoding.h"
+#include "zetasketch/hll/normal_representation.h"
+#include "zetasketch/hll/sparse_representation.h"
+#include "zetasketch/hll/state.h"
+
+namespace zetasketch {
+
+std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::Create(
+    int32_t normal_precision, int32_t sparse_precision) {
+  hll::State state;
+  state.type = HYPERLOGLOG_PLUS_UNIQUE;
+  state.precision = normal_precision;
+  state.sparse_precision = sparse_precision;
+
+  if (sparse_precision == kSparsePrecisionDisabled) {
+    auto rep_res = hll::NormalRepresentation::Create(std::move(state));
+    if (!rep_res.has_value()) return std::unexpected(rep_res.error());
+    return HyperLogLogPlusPlus(std::move(rep_res.value()));
+  } else {
+    auto rep_res = hll::SparseRepresentation::Create(std::move(state));
+    if (!rep_res.has_value()) return std::unexpected(rep_res.error());
+    return HyperLogLogPlusPlus(std::move(rep_res.value()));
+  }
+}
+
+void HyperLogLogPlusPlus::Add(std::string_view value) {
+  (void)value;
+  // Stub for now. Hashing is usually done via FarmHash.
+  // Not strictly needed to test serialization round-tripping if we use
+  // Add(int64_t).
+}
+
+void HyperLogLogPlusPlus::Add(int64_t value) {
+  // Simple stub/dummy hash for testing serialization round-trip without
+  // farmhash dep here Real implementation will use farmhash and handle types
+  // properly.
+  (void)AddHash(static_cast<uint64_t>(value * 0x9E3779B97F4A7C15ULL));
+}
+
+std::expected<void, utils::Error> HyperLogLogPlusPlus::AddHash(uint64_t hash) {
+  if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
+    auto res =
+        std::get<hll::NormalRepresentation>(representation_).AddHash(hash);
+    if (!res.has_value()) return std::unexpected(res.error());
+    std::get<hll::NormalRepresentation>(representation_).state().num_values++;
+  } else {
+    auto res = std::move(std::get<hll::SparseRepresentation>(representation_))
+                   .AddHash(hash);
+    if (!res.has_value()) return std::unexpected(res.error());
+    representation_ = std::move(res.value());
+
+    if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
+      std::get<hll::NormalRepresentation>(representation_).state().num_values++;
+    } else {
+      std::get<hll::SparseRepresentation>(representation_).state().num_values++;
+    }
+  }
+  return {};
+}
+
+std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
+    HyperLogLogPlusPlus&& other) {
+  (void)other;
+  // Stub for now
+  return {};
+}
+
+int64_t HyperLogLogPlusPlus::Result() const {
+  if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
+    auto res = std::get<hll::NormalRepresentation>(representation_).Estimate();
+    return res.value_or(0);
+  } else {
+    auto res = std::get<hll::SparseRepresentation>(representation_).Estimate();
+    return res.value_or(0);
+  }
+}
+
+std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::FromBytes(
+    std::span<const uint8_t> data) {
+  auto state_result = hll::State::Parse(data);
+  if (!state_result.has_value()) {
+    return std::unexpected(state_result.error());
+  }
+  const auto& state = state_result.value();
+
+  if (state.sparse_data.has_value()) {
+    auto rep_result = hll::SparseRepresentation::Create(state);
+    if (!rep_result.has_value()) {
+      return std::unexpected(rep_result.error());
+    }
+    return HyperLogLogPlusPlus(std::move(rep_result.value()));
+  } else {
+    auto rep_result = hll::NormalRepresentation::Create(state);
+    if (!rep_result.has_value()) {
+      return std::unexpected(rep_result.error());
+    }
+    return HyperLogLogPlusPlus(std::move(rep_result.value()));
+  }
+}
+
+std::expected<std::vector<uint8_t>, utils::Error>
+HyperLogLogPlusPlus::Serialize() const {
+  hll::State state;
+
+  if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
+    state = std::get<hll::NormalRepresentation>(representation_).state();
+    state.sparse_precision = kSparsePrecisionDisabled;
+    state.sparse_size = 0;
+  } else {
+    hll::SparseRepresentation copy =
+        std::get<hll::SparseRepresentation>(representation_);
+    auto compact_res = std::move(copy).Compact();
+    if (!compact_res.has_value()) {
+      return std::unexpected(compact_res.error());
+    }
+
+    if (std::holds_alternative<hll::NormalRepresentation>(
+            compact_res.value())) {
+      state = std::get<hll::NormalRepresentation>(compact_res.value()).state();
+      state.sparse_precision = kSparsePrecisionDisabled;
+      state.sparse_size = 0;
+    } else {
+      state = std::get<hll::SparseRepresentation>(compact_res.value()).state();
+    }
+  }
+
+  state.type = zetasketch::HYPERLOGLOG_PLUS_UNIQUE;
+  return state.ToByteArray();
+}
+
+std::expected<void, utils::Error> HyperLogLogPlusPlus::Serialize(
+    std::vector<uint8_t>& sink) const {
+  auto bytes_result = Serialize();
+  if (!bytes_result.has_value()) {
+    return std::unexpected(bytes_result.error());
+  }
+
+  sink = std::move(bytes_result.value());
+  return {};
+}
+
+}  // namespace zetasketch

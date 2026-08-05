@@ -62,3 +62,22 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "state_test",
+    srcs = ["state_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "//src/proto:zetasketch_cc_proto",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "hyperloglogplusplus_test",
+    srcs = ["hyperloglogplusplus_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)

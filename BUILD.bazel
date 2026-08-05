@@ -20,6 +20,8 @@ cc_library(
         "src/hll/math_utils.cc",
         "src/hll/normal_representation.cc",
         "src/hll/sparse_representation.cc",
+        "src/hll/state.cc",
+        "src/hyperloglogplusplus.cc",
     ],
     hdrs = [
         "include/zetasketch/bias_data.h",
