@@ -5,6 +5,7 @@
 #include "zetasketch/hyperloglogplusplus.h"
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -78,7 +79,6 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::AddHash(uint64_t hash) {
   return {};
 }
 
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
     HyperLogLogPlusPlus&& other) {
   int32_t self_precision = 0;
@@ -121,22 +121,23 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
   }
 
   auto result = std::visit(
-      [this](auto& self_rep_ref,
-             auto& other_rep_ref) -> std::expected<void, utils::Error> {
+      [](auto& self_rep_ref, auto& other_rep_ref)
+          -> std::expected<std::optional<hll::Representation>, utils::Error> {
         using SelfType = std::decay_t<decltype(self_rep_ref)>;
         using OtherType = std::decay_t<decltype(other_rep_ref)>;
 
         if constexpr (std::is_same_v<SelfType, hll::NormalRepresentation> &&
                       std::is_same_v<OtherType, hll::NormalRepresentation>) {
-          return self_rep_ref.MergeFromNormal(std::move(other_rep_ref));
+          auto res = self_rep_ref.MergeFromNormal(std::move(other_rep_ref));
+          if (!res.has_value()) return std::unexpected(res.error());
+          return std::nullopt;
         } else if constexpr (std::is_same_v<SelfType,
                                             hll::SparseRepresentation> &&
                              std::is_same_v<OtherType,
                                             hll::SparseRepresentation>) {
           auto res = std::move(self_rep_ref).MergeFromSparse(other_rep_ref);
           if (!res.has_value()) return std::unexpected(res.error());
-          representation_ = std::move(res.value());
-          return {};
+          return std::move(res.value());
         } else if constexpr (std::is_same_v<SelfType,
                                             hll::NormalRepresentation> &&
                              std::is_same_v<OtherType,
@@ -145,9 +146,11 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
           if (!norm_other_res.has_value()) {
             return std::unexpected(norm_other_res.error());
           }
-          return self_rep_ref.MergeFromNormal(
-              std::get<hll::NormalRepresentation>(
+          auto res =
+              self_rep_ref.MergeFromNormal(std::get<hll::NormalRepresentation>(
                   std::move(norm_other_res.value())));
+          if (!res.has_value()) return std::unexpected(res.error());
+          return std::nullopt;
         } else if constexpr (std::is_same_v<SelfType,
                                             hll::SparseRepresentation> &&
                              std::is_same_v<OtherType,
@@ -162,8 +165,7 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
                 std::get<hll::NormalRepresentation>(self_norm).MergeFromNormal(
                     std::move(other_rep_ref));
             if (!res.has_value()) return std::unexpected(res.error());
-            representation_ = std::move(self_norm);
-            return {};
+            return std::move(self_norm);
           }
           return std::unexpected(utils::Error{
               .code = utils::ErrorCode::kInvalidState,
@@ -173,18 +175,23 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
       },
       representation_, other.representation_);
 
-  if (result.has_value()) {
-    if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
-      std::get<hll::NormalRepresentation>(representation_).state().num_values +=
-          other_count;
-    } else {
-      std::get<hll::SparseRepresentation>(representation_).state().num_values +=
-          other_count;
-    }
+  if (!result.has_value()) {
+    return std::unexpected(result.error());
+  }
+
+  if (result.value().has_value()) {
+    representation_ = std::move(result.value().value());
+  }
+  if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
+    std::get<hll::NormalRepresentation>(representation_).state().num_values +=
+        other_count;
+  } else {
+    std::get<hll::SparseRepresentation>(representation_).state().num_values +=
+        other_count;
   }
 
   (void)std::move(other);
-  return result;
+  return {};
 }
 
 int64_t HyperLogLogPlusPlus::Result() const {

@@ -23,21 +23,24 @@ constexpr size_t kMergeB64MergedIndex = 4;
 constexpr size_t kMergeExpectedCardinalityIndex = 5;
 constexpr size_t kMergeTokensCount = 6;
 
-// NOLINTBEGIN
 std::string Base64Decode(const std::string& encoded_string) {
-  static const std::string base64_chars =
+  // NOLINTBEGIN(readability-magic-numbers,
+  // cppcoreguidelines-avoid-magic-numbers, hicpp-signed-bitwise,
+  // misc-const-correctness)
+  static const std::string kBase64Chars =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       "abcdefghijklmnopqrstuvwxyz"
       "0123456789+/";
 
-  std::vector<int> T(256, -1);
-  for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+  std::vector<int> char_lookup(256, -1);
+  for (int i = 0; i < 64; i++) char_lookup[kBase64Chars[i]] = i;
 
   std::string decoded;
-  int val = 0, valb = -8;
+  int val = 0;
+  int valb = -8;
   for (unsigned char c : encoded_string) {
-    if (T[c] == -1) break;
-    val = (val << 6) + T[c];
+    if (char_lookup[c] == -1) break;
+    val = (val << 6) + char_lookup[c];
     valb += 6;
     if (valb >= 0) {
       decoded.push_back(static_cast<char>((val >> valb) & 0xFF));
@@ -45,29 +48,36 @@ std::string Base64Decode(const std::string& encoded_string) {
     }
   }
   return decoded;
+  // NOLINTEND(readability-magic-numbers, cppcoreguidelines-avoid-magic-numbers,
+  // hicpp-signed-bitwise, misc-const-correctness)
 }
 
 std::string Base64Encode(const std::string& str) {
-  static const std::string base64_chars =
+  // NOLINTBEGIN(readability-magic-numbers,
+  // cppcoreguidelines-avoid-magic-numbers, hicpp-signed-bitwise,
+  // misc-const-correctness)
+  static const std::string kBase64Chars =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       "abcdefghijklmnopqrstuvwxyz"
       "0123456789+/";
 
   std::string ret;
-  int val = 0, valb = -6;
+  int val = 0;
+  int valb = -6;
   for (unsigned char c : str) {
     val = (val << 8) + c;
     valb += 8;
     while (valb >= 0) {
-      ret.push_back(base64_chars[(val >> valb) & 0x3F]);
+      ret.push_back(kBase64Chars[(val >> valb) & 0x3F]);
       valb -= 6;
     }
   }
-  if (valb > -6) ret.push_back(base64_chars[((val << 8) >> (valb + 8)) & 0x3F]);
+  if (valb > -6) ret.push_back(kBase64Chars[((val << 8) >> (valb + 8)) & 0x3F]);
   while (ret.size() % 4) ret.push_back('=');
   return ret;
+  // NOLINTEND(readability-magic-numbers, cppcoreguidelines-avoid-magic-numbers,
+  // hicpp-signed-bitwise, misc-const-correctness)
 }
-// NOLINTEND
 
 std::vector<std::string> SplitString(const std::string& str, char delimiter) {
   std::vector<std::string> tokens;
