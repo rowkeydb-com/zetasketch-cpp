@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -12,8 +13,7 @@ namespace {
 
 using zetasketch::HyperLogLogPlusPlus;
 
-// NOLINTNEXTLINE(readability-identifier-naming)
-void print_hex(const std::vector<uint8_t>& data) {
+void PrintHex(const std::vector<uint8_t>& data) {
   for (const uint8_t byte : data) {
     std::cout << std::hex << std::setw(2) << std::setfill('0')
               << static_cast<int>(byte);
@@ -38,8 +38,6 @@ uint8_t ParseHexByte(std::string_view hex_byte) {
 }
 
 }  // namespace
-
-#include <span>
 
 int main(int argc, char** argv) {
   const std::span<char*> args(argv, static_cast<size_t>(argc));
@@ -71,7 +69,7 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    print_hex(ser.value());
+    PrintHex(ser.value());
   } else if (mode == "MERGE") {
     // We expect at least normal_precision and sparse_precision
     if (args.size() < 4) return 1;
@@ -111,7 +109,7 @@ int main(int argc, char** argv) {
     auto ser = hll.Serialize();
     if (!ser.has_value()) return 1;
 
-    print_hex(ser.value());
+    PrintHex(ser.value());
   }
 
   return 0;
