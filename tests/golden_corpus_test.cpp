@@ -102,9 +102,10 @@ TEST(GoldenCorpusTest, VerifyParity) {
           std::stoll(tokens[kSketchExpectedCardinalityIndex]);
 
       const std::string bytes = Base64Decode(b64);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
       auto sketch_or = HyperLogLogPlusPlus::FromBytes(std::span<const uint8_t>(
           reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()));
+      // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
       ASSERT_TRUE(sketch_or.has_value())
           << "Failed to deserialize SKETCH " << name;
       auto sketch = std::move(sketch_or.value());
@@ -131,17 +132,19 @@ TEST(GoldenCorpusTest, VerifyParity) {
           std::stoll(tokens[kMergeExpectedCardinalityIndex]);
 
       const std::string bytes1 = Base64Decode(b64_1);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
       auto sketch1_or = HyperLogLogPlusPlus::FromBytes(std::span<const uint8_t>(
           reinterpret_cast<const uint8_t*>(bytes1.data()), bytes1.size()));
+      // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
       ASSERT_TRUE(sketch1_or.has_value())
           << "Failed to deserialize sketch1 for " << name;
       auto sketch1 = std::move(sketch1_or.value());
 
       const std::string bytes2 = Base64Decode(b64_2);
-      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
       auto sketch2_or = HyperLogLogPlusPlus::FromBytes(std::span<const uint8_t>(
           reinterpret_cast<const uint8_t*>(bytes2.data()), bytes2.size()));
+      // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
       ASSERT_TRUE(sketch2_or.has_value())
           << "Failed to deserialize sketch2 for " << name;
       auto sketch2 = std::move(sketch2_or.value());
