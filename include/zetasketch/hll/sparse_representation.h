@@ -53,6 +53,9 @@ class SparseRepresentation {
   // Compacts the sparse representation.
   [[nodiscard]] std::expected<Representation, utils::Error> Compact() &&;
 
+  // Converts this sparse representation to a normal representation.
+  [[nodiscard]] std::expected<Representation, utils::Error> Normalize() &&;
+
   [[nodiscard]] State& state() { return state_; }
   [[nodiscard]] const State& state() const { return state_; }
   [[nodiscard]] const encoding::Sparse& encoding() const { return encoding_; }
@@ -63,13 +66,10 @@ class SparseRepresentation {
                        size_t max_buffer_elements);
 
   [[nodiscard]] std::expected<void, utils::Error> FlushBuffer();
-  void SortAndDedupBuffer();
+  std::expected<void, utils::Error> SortAndDedupBuffer();
 
   [[nodiscard]] std::expected<Representation, utils::Error>
   UpdateRepresentation() &&;
-
-  // Converts this sparse representation to a normal representation.
-  [[nodiscard]] std::expected<Representation, utils::Error> Normalize() &&;
 
   State state_;
   encoding::Sparse encoding_;

@@ -81,3 +81,11 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_binary(
+    name = "fuzzer_cli",
+    srcs = ["fuzzer_cli.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+    ],
+)

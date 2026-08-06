@@ -79,12 +79,15 @@ std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
 
   zetasketch::HyperLogLogPlusUniqueStateProto hll_proto;
 
-  // Enforce Proto2 explicit-set semantics:
-  // We must set these unconditionally, because the parser on the other
-  // end might expect them if they are part of the active algorithm state.
-  hll_proto.set_sparse_size(sparse_size);
+  // Enforce Proto2 explicit-set semantics for precisions:
   hll_proto.set_precision_or_num_buckets(precision);
-  hll_proto.set_sparse_precision_or_num_buckets(sparse_precision);
+  if (sparse_precision != 0) {
+    hll_proto.set_sparse_precision_or_num_buckets(sparse_precision);
+  }
+
+  if (sparse_data.has_value()) {
+    hll_proto.set_sparse_size(sparse_size);
+  }
 
   if (data.has_value() && !data->empty()) {
     hll_proto.set_data(absl::string_view(
