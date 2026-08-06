@@ -19,7 +19,7 @@ namespace zetasketch::hll {
 // directly to the Java and Rust reference implementations.
 enum class ValueType : int32_t {
   kUnknown = 0,
-  // Maps to DefaultOpsTypeId / CustomValueTypeId depending on the id
+  kBytesOrUtf8String = 11,
 };
 
 struct State {

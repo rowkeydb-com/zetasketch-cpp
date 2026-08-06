@@ -43,5 +43,6 @@ cc_library(
     deps = [
         "@protobuf//:protobuf",
         "//src/proto:zetasketch_cc_proto",
+        "//src/farmhash",
     ],
 )

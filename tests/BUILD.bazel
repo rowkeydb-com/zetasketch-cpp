@@ -81,3 +81,21 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_binary(
+    name = "fuzzer_cli",
+    srcs = ["fuzzer_cli.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+    ],
+)
+
+cc_test(
+    name = "golden_corpus_test",
+    srcs = ["golden_corpus_test.cpp"],
+    data = ["golden_corpus.tsv"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)

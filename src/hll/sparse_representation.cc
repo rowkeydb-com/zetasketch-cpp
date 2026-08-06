@@ -81,21 +81,37 @@ std::expected<void, utils::Error> SparseRepresentation::CheckPrecision(
   return {};
 }
 
-void SparseRepresentation::SortAndDedupBuffer() {
-  std::ranges::sort(buffer_, [this](uint32_t a, uint32_t b) {
-    const uint32_t idx_a = encoding_.DecodeSparseIndex(a);
-    const uint32_t idx_b = encoding_.DecodeSparseIndex(b);
-    if (idx_a != idx_b) {
-      return idx_a < idx_b;
-    }
-    return a > b;
-  });
+std::expected<void, utils::Error> SparseRepresentation::SortAndDedupBuffer() {
+  if (buffer_.empty()) {
+    return {};
+  }
 
-  auto unique_range =
-      std::ranges::unique(buffer_, [this](uint32_t a, uint32_t b) {
-        return encoding_.DecodeSparseIndex(a) == encoding_.DecodeSparseIndex(b);
-      });
-  buffer_.erase(unique_range.begin(), buffer_.end());
+  std::ranges::sort(buffer_);
+
+  std::vector<uint32_t> deduped;
+  deduped.reserve(buffer_.size());
+  std::optional<uint32_t> last_value;
+
+  for (const uint32_t value : buffer_) {
+    if (!last_value.has_value() || value != last_value.value()) {
+      const uint32_t index = encoding_.DecodeSparseIndex(value);
+      if (index >= (1U << static_cast<uint32_t>(state_.sparse_precision))) {
+        return std::unexpected(
+            utils::Error{.code = utils::ErrorCode::kInvalidState,
+                         .message = "Invalid sparse index out of range."});
+      }
+      if (!deduped.empty() &&
+          encoding_.DecodeSparseIndex(deduped.back()) == index) {
+        deduped.back() = value;
+      } else {
+        deduped.push_back(value);
+      }
+      last_value = value;
+    }
+  }
+
+  buffer_ = std::move(deduped);
+  return {};
 }
 
 std::expected<void, utils::Error> SparseRepresentation::FlushBuffer() {
@@ -103,7 +119,8 @@ std::expected<void, utils::Error> SparseRepresentation::FlushBuffer() {
     return {};
   }
 
-  SortAndDedupBuffer();
+  auto sort_res = SortAndDedupBuffer();
+  if (!sort_res.has_value()) return std::unexpected(sort_res.error());
 
   utils::DifferenceEncoder encoder(std::move(scratch_sparse_data_));
   int32_t new_sparse_size = 0;

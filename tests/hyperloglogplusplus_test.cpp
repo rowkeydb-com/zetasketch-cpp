@@ -46,7 +46,7 @@ TEST(HyperLogLogPlusPlusTest, RoundTripSerializationSparse) {
   sketch.Add(kTestValue2);
 
   auto serialized_res = sketch.Serialize();
-  ASSERT_TRUE(serialized_res.has_value());
+  ASSERT_TRUE(serialized_res.has_value()) << serialized_res.error().message;
 
   auto deserialized_res =
       HyperLogLogPlusPlus::FromBytes(serialized_res.value());

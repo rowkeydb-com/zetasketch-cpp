@@ -1,16 +1,12 @@
-// SPDX-FileCopyrightText: 2026 RowKeyDB
-//
-// SPDX-License-Identifier: Apache-2.0
-
 #include "zetasketch/hll/state.h"
 #include <gtest/gtest.h>
-#include "hllplusplus.pb.h"
 #include "aggregator.pb.h"
+#include "hllplusplus.pb.h"
 
 namespace zetasketch::hll {
 namespace {
 
-TEST(StateTest, ExplicitSetSemanticsForDefaults) {
+TEST(StateTest, OmitDefaultsForBitExactness) {
   State state;
   state.type = zetasketch::HYPERLOGLOG_PLUS_UNIQUE;
   state.num_values = 0;
@@ -35,7 +31,8 @@ TEST(StateTest, ExplicitSetSemanticsForDefaults) {
   EXPECT_EQ(parsed.encoding_version, 2);
   EXPECT_EQ(parsed.type, zetasketch::HYPERLOGLOG_PLUS_UNIQUE);
 
-  // Verify that the proto fields are actually present in the serialized output.
+  // Verify that the proto fields are omitted for defaults (sparse_size and
+  // sparse_precision=0)
   zetasketch::AggregatorStateProto raw_proto;
   ASSERT_TRUE(
       raw_proto.ParseFromArray(bytes_result->data(), bytes_result->size()));
@@ -43,9 +40,9 @@ TEST(StateTest, ExplicitSetSemanticsForDefaults) {
   const auto& hll_ext =
       raw_proto.GetExtension(zetasketch::hyperloglogplus_unique_state);
 
-  EXPECT_TRUE(hll_ext.has_sparse_size());
   EXPECT_TRUE(hll_ext.has_precision_or_num_buckets());
-  EXPECT_TRUE(hll_ext.has_sparse_precision_or_num_buckets());
+  EXPECT_FALSE(hll_ext.has_sparse_size());
+  EXPECT_FALSE(hll_ext.has_sparse_precision_or_num_buckets());
 }
 
 }  // namespace
