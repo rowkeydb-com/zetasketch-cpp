@@ -7,6 +7,7 @@
 #include <expected>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -15,7 +16,6 @@
 #include "zetasketch/hll/sparse_representation.h"
 #include "zetasketch/hll/state.h"
 #include "zetasketch/utils/buffer_traits.h"
-#include <type_traits>
 
 namespace zetasketch {
 
@@ -83,79 +83,103 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
     HyperLogLogPlusPlus&& other) {
   int32_t self_precision = 0;
   if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
-    self_precision = std::get<hll::NormalRepresentation>(representation_).state().precision;
+    self_precision =
+        std::get<hll::NormalRepresentation>(representation_).state().precision;
   } else {
-    self_precision = std::get<hll::SparseRepresentation>(representation_).state().precision;
+    self_precision =
+        std::get<hll::SparseRepresentation>(representation_).state().precision;
   }
 
   int32_t other_precision = 0;
-  if (std::holds_alternative<hll::NormalRepresentation>(other.representation_)) {
-    other_precision = std::get<hll::NormalRepresentation>(other.representation_).state().precision;
+  if (std::holds_alternative<hll::NormalRepresentation>(
+          other.representation_)) {
+    other_precision = std::get<hll::NormalRepresentation>(other.representation_)
+                          .state()
+                          .precision;
   } else {
-    other_precision = std::get<hll::SparseRepresentation>(other.representation_).state().precision;
+    other_precision = std::get<hll::SparseRepresentation>(other.representation_)
+                          .state()
+                          .precision;
   }
 
   if (self_precision != other_precision) {
-    return std::unexpected(utils::Error{
-        .code = utils::ErrorCode::kIncompatiblePrecision,
-        .message = "Precision mismatch"});
+    return std::unexpected(
+        utils::Error{.code = utils::ErrorCode::kIncompatiblePrecision,
+                     .message = "Precision mismatch"});
   }
 
   int64_t other_count = 0;
-  if (std::holds_alternative<hll::NormalRepresentation>(other.representation_)) {
-    other_count = std::get<hll::NormalRepresentation>(other.representation_).state().num_values;
+  if (std::holds_alternative<hll::NormalRepresentation>(
+          other.representation_)) {
+    other_count = std::get<hll::NormalRepresentation>(other.representation_)
+                      .state()
+                      .num_values;
   } else {
-    other_count = std::get<hll::SparseRepresentation>(other.representation_).state().num_values;
+    other_count = std::get<hll::SparseRepresentation>(other.representation_)
+                      .state()
+                      .num_values;
   }
 
   auto result = std::visit(
-      [this](auto& self_rep_ref, auto& other_rep_ref) -> std::expected<void, utils::Error> {
+      [this](auto& self_rep_ref,
+             auto& other_rep_ref) -> std::expected<void, utils::Error> {
         using SelfType = std::decay_t<decltype(self_rep_ref)>;
         using OtherType = std::decay_t<decltype(other_rep_ref)>;
 
         if constexpr (std::is_same_v<SelfType, hll::NormalRepresentation> &&
                       std::is_same_v<OtherType, hll::NormalRepresentation>) {
           return self_rep_ref.MergeFromNormal(std::move(other_rep_ref));
-        } else if constexpr (std::is_same_v<SelfType, hll::SparseRepresentation> &&
-                             std::is_same_v<OtherType, hll::SparseRepresentation>) {
+        } else if constexpr (std::is_same_v<SelfType,
+                                            hll::SparseRepresentation> &&
+                             std::is_same_v<OtherType,
+                                            hll::SparseRepresentation>) {
           auto res = std::move(self_rep_ref).MergeFromSparse(other_rep_ref);
           if (!res.has_value()) return std::unexpected(res.error());
           representation_ = std::move(res.value());
           return {};
-        } else if constexpr (std::is_same_v<SelfType, hll::NormalRepresentation> &&
-                             std::is_same_v<OtherType, hll::SparseRepresentation>) {
+        } else if constexpr (std::is_same_v<SelfType,
+                                            hll::NormalRepresentation> &&
+                             std::is_same_v<OtherType,
+                                            hll::SparseRepresentation>) {
           auto norm_other_res = std::move(other_rep_ref).Normalize();
           if (!norm_other_res.has_value()) {
             return std::unexpected(norm_other_res.error());
           }
           return self_rep_ref.MergeFromNormal(
-              std::get<hll::NormalRepresentation>(std::move(norm_other_res.value())));
-        } else if constexpr (std::is_same_v<SelfType, hll::SparseRepresentation> &&
-                             std::is_same_v<OtherType, hll::NormalRepresentation>) {
+              std::get<hll::NormalRepresentation>(
+                  std::move(norm_other_res.value())));
+        } else if constexpr (std::is_same_v<SelfType,
+                                            hll::SparseRepresentation> &&
+                             std::is_same_v<OtherType,
+                                            hll::NormalRepresentation>) {
           auto self_norm_res = std::move(self_rep_ref).Normalize();
           if (!self_norm_res.has_value()) {
             return std::unexpected(self_norm_res.error());
           }
           auto& self_norm = self_norm_res.value();
           if (std::holds_alternative<hll::NormalRepresentation>(self_norm)) {
-            auto res = std::get<hll::NormalRepresentation>(self_norm).MergeFromNormal(
-                std::move(other_rep_ref));
+            auto res =
+                std::get<hll::NormalRepresentation>(self_norm).MergeFromNormal(
+                    std::move(other_rep_ref));
             if (!res.has_value()) return std::unexpected(res.error());
             representation_ = std::move(self_norm);
             return {};
           }
           return std::unexpected(utils::Error{
               .code = utils::ErrorCode::kInvalidState,
-              .message = "Sparse normalization did not return NormalRepresentation"});
+              .message =
+                  "Sparse normalization did not return NormalRepresentation"});
         }
       },
       representation_, other.representation_);
 
   if (result.has_value()) {
     if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
-      std::get<hll::NormalRepresentation>(representation_).state().num_values += other_count;
+      std::get<hll::NormalRepresentation>(representation_).state().num_values +=
+          other_count;
     } else {
-      std::get<hll::SparseRepresentation>(representation_).state().num_values += other_count;
+      std::get<hll::SparseRepresentation>(representation_).state().num_values +=
+          other_count;
     }
   }
 
@@ -202,8 +226,6 @@ HyperLogLogPlusPlus::Serialize() const {
 
   if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
     state = std::get<hll::NormalRepresentation>(representation_).state();
-    state.sparse_precision = kSparsePrecisionDisabled;
-    state.sparse_size = 0;
   } else {
     hll::SparseRepresentation copy =
         std::get<hll::SparseRepresentation>(representation_);
@@ -215,8 +237,6 @@ HyperLogLogPlusPlus::Serialize() const {
     if (std::holds_alternative<hll::NormalRepresentation>(
             compact_res.value())) {
       state = std::get<hll::NormalRepresentation>(compact_res.value()).state();
-      state.sparse_precision = kSparsePrecisionDisabled;
-      state.sparse_size = 0;
     } else {
       state = std::get<hll::SparseRepresentation>(compact_res.value()).state();
     }

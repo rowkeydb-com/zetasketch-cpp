@@ -85,7 +85,7 @@ std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
     hll_proto.set_sparse_precision_or_num_buckets(sparse_precision);
   }
 
-  if (sparse_data.has_value()) {
+  if (sparse_data.has_value() && sparse_size > 0) {
     hll_proto.set_sparse_size(sparse_size);
   }
 
@@ -95,7 +95,7 @@ std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
         reinterpret_cast<const char*>(data->data()), data->size()));
   }
 
-  if (sparse_data.has_value() && !sparse_data->empty()) {
+  if (sparse_data.has_value()) {
     hll_proto.set_sparse_data(absl::string_view(
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         reinterpret_cast<const char*>(sparse_data->data()),
