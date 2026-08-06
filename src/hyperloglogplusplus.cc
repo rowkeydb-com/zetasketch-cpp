@@ -146,9 +146,15 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
           if (!norm_other_res.has_value()) {
             return std::unexpected(norm_other_res.error());
           }
-          auto res =
-              self_rep_ref.MergeFromNormal(std::get<hll::NormalRepresentation>(
-                  std::move(norm_other_res.value())));
+          auto& norm_other = norm_other_res.value();
+          if (!std::holds_alternative<hll::NormalRepresentation>(norm_other)) {
+            return std::unexpected(
+                utils::Error{.code = utils::ErrorCode::kInvalidState,
+                             .message = "Sparse normalization did not return "
+                                        "NormalRepresentation"});
+          }
+          auto res = self_rep_ref.MergeFromNormal(
+              std::get<hll::NormalRepresentation>(std::move(norm_other)));
           if (!res.has_value()) return std::unexpected(res.error());
           return std::nullopt;
         } else if constexpr (std::is_same_v<SelfType,

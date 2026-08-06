@@ -39,16 +39,18 @@ uint8_t ParseHexByte(std::string_view hex_byte) {
 
 }  // namespace
 
-// NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+#include <span>
+
 int main(int argc, char** argv) {
-  if (argc < 2) return 1;
-  const std::string mode = argv[1];
+  const std::span<char*> args(argv, static_cast<size_t>(argc));
+  if (args.size() < 2) return 1;
+  const std::string mode = args[1];
 
   if (mode == "CREATE") {
     // We expect at least normal_precision and sparse_precision
-    if (argc < 4) return 1;
-    const int normal_precision = std::stoi(argv[2]);
-    const int sparse_precision = std::stoi(argv[3]);
+    if (args.size() < 4) return 1;
+    const int normal_precision = std::stoi(args[2]);
+    const int sparse_precision = std::stoi(args[3]);
 
     auto hll_res =
         HyperLogLogPlusPlus::Create(normal_precision, sparse_precision);
@@ -72,9 +74,9 @@ int main(int argc, char** argv) {
     print_hex(ser.value());
   } else if (mode == "MERGE") {
     // We expect at least normal_precision and sparse_precision
-    if (argc < 4) return 1;
-    const int normal_precision = std::stoi(argv[2]);
-    const int sparse_precision = std::stoi(argv[3]);
+    if (args.size() < 4) return 1;
+    const int normal_precision = std::stoi(args[2]);
+    const int sparse_precision = std::stoi(args[3]);
 
     auto hll_res =
         HyperLogLogPlusPlus::Create(normal_precision, sparse_precision);
@@ -114,4 +116,3 @@ int main(int argc, char** argv) {
 
   return 0;
 }
-// NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
