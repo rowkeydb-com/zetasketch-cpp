@@ -3,15 +3,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "zetasketch/hll/state.h"
+
+#include <cstdint>
+#include <expected>
+#include <span>
 #include <vector>
+
+#include "aggregator.pb.h"
 #include "hllplusplus.pb.h"
+#include "zetasketch/utils/buffer_traits.h"
 
 namespace zetasketch::hll {
 
 std::expected<State, utils::Error> State::Parse(
     std::span<const uint8_t> input) {
   zetasketch::AggregatorStateProto proto;
-  if (!proto.ParseFromArray(input.data(), input.size())) {
+  if (!proto.ParseFromArray(input.data(), static_cast<int>(input.size()))) {
     return std::unexpected(
         utils::Error{.code = utils::ErrorCode::kProtoDeserialization,
                      .message = "Failed to parse state"});
@@ -83,13 +90,15 @@ std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
 
   if (data.has_value() && !data->empty()) {
     hll_proto.set_data(absl::string_view(
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         reinterpret_cast<const char*>(data->data()), data->size()));
   }
 
   if (sparse_data.has_value() && !sparse_data->empty()) {
-    hll_proto.set_sparse_data(
-        absl::string_view(reinterpret_cast<const char*>(sparse_data->data()),
-                          sparse_data->size()));
+    hll_proto.set_sparse_data(absl::string_view(
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        reinterpret_cast<const char*>(sparse_data->data()),
+        sparse_data->size()));
   }
 
   proto.MutableExtension(zetasketch::hyperloglogplus_unique_state)
@@ -97,7 +106,7 @@ std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
 
   std::vector<uint8_t> output;
   output.resize(proto.ByteSizeLong());
-  if (!proto.SerializeToArray(output.data(), output.size())) {
+  if (!proto.SerializeToArray(output.data(), static_cast<int>(output.size()))) {
     return std::unexpected(
         utils::Error{.code = utils::ErrorCode::kProtoSerialization,
                      .message = "Failed to serialize state"});
