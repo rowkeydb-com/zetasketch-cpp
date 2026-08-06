@@ -3,10 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "zetasketch/hyperloglogplusplus.h"
-#include "zetasketch/hll/normal_representation.h"
-#include "zetasketch/hll/sparse_representation.h"
-#include "zetasketch/hll/state.h"
-
 #include <cstdint>
 #include <expected>
 #include <span>
@@ -14,8 +10,10 @@
 #include <utility>
 #include <variant>
 #include <vector>
-
 #include "aggregator.pb.h"
+#include "zetasketch/hll/normal_representation.h"
+#include "zetasketch/hll/sparse_representation.h"
+#include "zetasketch/hll/state.h"
 #include "zetasketch/utils/buffer_traits.h"
 
 namespace zetasketch {
@@ -31,8 +29,8 @@ std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::Create(
     auto rep_res = hll::NormalRepresentation::Create(std::move(state));
     if (!rep_res.has_value()) return std::unexpected(rep_res.error());
     return HyperLogLogPlusPlus(std::move(rep_res.value()));
-  } 
-  
+  }
+
   auto rep_res = hll::SparseRepresentation::Create(std::move(state));
   if (!rep_res.has_value()) return std::unexpected(rep_res.error());
   return HyperLogLogPlusPlus(std::move(rep_res.value()));
@@ -42,13 +40,15 @@ std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::Create(
 void HyperLogLogPlusPlus::Add(std::string_view value) {
   (void)value;
   // Stub for now. Hashing is usually done via FarmHash.
-  // Not strictly needed to test serialization round-tripping if we use Add(int64_t).
+  // Not strictly needed to test serialization round-tripping if we use
+  // Add(int64_t).
 }
 
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 void HyperLogLogPlusPlus::Add(int64_t value) {
-  // Simple stub/dummy hash for testing serialization round-trip without farmhash dep here
-  // Real implementation will use farmhash and handle types properly.
+  // Simple stub/dummy hash for testing serialization round-trip without
+  // farmhash dep here Real implementation will use farmhash and handle types
+  // properly.
   constexpr uint64_t kDummyHashMultiplier = 0x9E3779B97F4A7C15ULL;
   auto res = AddHash(static_cast<uint64_t>(value) * kDummyHashMultiplier);
   if (!res.has_value()) {
@@ -90,7 +90,7 @@ int64_t HyperLogLogPlusPlus::Result() const {
     auto res = std::get<hll::NormalRepresentation>(representation_).Estimate();
     return res.value_or(0);
   }
-  
+
   auto res = std::get<hll::SparseRepresentation>(representation_).Estimate();
   return res.value_or(0);
 }
@@ -109,8 +109,8 @@ std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::FromBytes(
       return std::unexpected(rep_result.error());
     }
     return HyperLogLogPlusPlus(std::move(rep_result.value()));
-  } 
-  
+  }
+
   auto rep_result = hll::NormalRepresentation::Create(state);
   if (!rep_result.has_value()) {
     return std::unexpected(rep_result.error());

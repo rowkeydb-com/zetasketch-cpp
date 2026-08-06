@@ -3,12 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "zetasketch/hll/state.h"
-
 #include <cstdint>
 #include <expected>
 #include <span>
 #include <vector>
-
 #include "aggregator.pb.h"
 #include "hllplusplus.pb.h"
 #include "zetasketch/utils/buffer_traits.h"

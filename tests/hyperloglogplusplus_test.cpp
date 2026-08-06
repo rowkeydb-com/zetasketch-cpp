@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "zetasketch/hyperloglogplusplus.h"
-#include <gtest/gtest.h>
 #include <cstdint>
+#include <gtest/gtest.h>
 
 namespace zetasketch {
 namespace {
@@ -37,7 +37,8 @@ TEST(HyperLogLogPlusPlusTest, RoundTripSerializationDense) {
 }
 
 TEST(HyperLogLogPlusPlusTest, RoundTripSerializationSparse) {
-  auto sketch_res = HyperLogLogPlusPlus::Create(kTestNormalPrecision, kTestSparsePrecision);
+  auto sketch_res =
+      HyperLogLogPlusPlus::Create(kTestNormalPrecision, kTestSparsePrecision);
   ASSERT_TRUE(sketch_res.has_value());
   auto& sketch = sketch_res.value();
 
