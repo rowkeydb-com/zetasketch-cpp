@@ -99,3 +99,26 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+java_binary(
+    name = "ZetaSketchCli",
+    srcs = ["ZetaSketchCli.java"],
+    main_class = "ZetaSketchCli",
+    deps = [
+        "@maven//:com_google_zetasketch_zetasketch",
+    ],
+)
+
+py_test(
+    name = "differential_fuzzer",
+    srcs = ["differential_fuzzer.py"],
+    data = [
+        ":fuzzer_cli",
+        ":ZetaSketchCli",
+    ],
+    args = [
+        "$(location :fuzzer_cli)",
+        "$(location :ZetaSketchCli)",
+    ],
+)
+

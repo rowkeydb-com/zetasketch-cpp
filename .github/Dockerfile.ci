@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y \
         ninja-build \
         libc++-18-dev \
         libc++abi-18-dev \
-        openjdk-21-jre-headless \
+        openjdk-21-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 
 # clang-tidy-21 and clang-format-21 from apt.llvm.org. We keep the
