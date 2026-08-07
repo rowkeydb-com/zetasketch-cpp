@@ -17,6 +17,7 @@
 #include "zetasketch/hll/sparse_representation.h"
 #include "zetasketch/hll/state.h"
 #include "zetasketch/utils/buffer_traits.h"
+#include "src/farmhash/fingerprint2011.h"
 
 namespace zetasketch {
 
@@ -24,6 +25,8 @@ std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::Create(
     int32_t normal_precision, int32_t sparse_precision) {
   hll::State state;
   state.type = HYPERLOGLOG_PLUS_UNIQUE;
+  state.encoding_version = 2;
+  state.value_type = hll::ValueType::kBytesOrUtf8String;
   state.precision = normal_precision;
   state.sparse_precision = sparse_precision;
 
@@ -40,10 +43,11 @@ std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::Create(
 
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 void HyperLogLogPlusPlus::Add(std::string_view value) {
-  (void)value;
-  // Stub for now. Hashing is usually done via FarmHash.
-  // Not strictly needed to test serialization round-tripping if we use
-  // Add(int64_t).
+  const uint64_t hash = Fingerprint2011(value.data(), value.size());
+  auto res = AddHash(hash);
+  if (!res.has_value()) {
+    // Ignore error for now, as in original stub
+  }
 }
 
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
