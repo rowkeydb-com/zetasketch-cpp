@@ -82,14 +82,6 @@ cc_test(
     ],
 )
 
-cc_binary(
-    name = "fuzzer_cli",
-    srcs = ["fuzzer_cli.cpp"],
-    deps = [
-        "//:zetasketch-cpp",
-    ],
-)
-
 cc_test(
     name = "golden_corpus_test",
     srcs = ["golden_corpus_test.cpp"],
@@ -99,3 +91,33 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+java_binary(
+    name = "ZetaSketchCli",
+    srcs = ["ZetaSketchCli.java"],
+    main_class = "ZetaSketchCli",
+    deps = [
+        "@maven//:com_google_zetasketch_zetasketch",
+    ],
+)
+
+cc_test(
+    name = "differential_fuzzer",
+    srcs = ["differential_fuzzer_test.cpp"],
+    data = [":ZetaSketchCli"],
+    args = ["--java_cli=tests/ZetaSketchCli"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "error_handling_test",
+    srcs = ["error_handling_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)
+
