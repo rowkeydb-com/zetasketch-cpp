@@ -80,8 +80,17 @@ DOCKER_OPTS+=(--user "$(id -u):$(id -g)")
 DOCKER_OPTS+=(-e HOME=/tmp)
 DOCKER_OPTS+=(-e USER=zetasketch-cpp)
 DOCKER_OPTS+=(-v "$WORKSPACE_DIR:/workspace")
-mkdir -p "$WORKSPACE_DIR/.bazel-cache"
-DOCKER_OPTS+=(-v "$WORKSPACE_DIR/.bazel-cache:/tmp/bazel-cache")
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    mkdir -p "$WORKSPACE_DIR/.bazel-cache"
+    DOCKER_OPTS+=(-v "$WORKSPACE_DIR/.bazel-cache:/tmp/bazel-cache")
+else
+    mkdir -p "$HOME/.cache/bazel"
+    DOCKER_OPTS+=(-v "$HOME/.cache/bazel:/tmp/bazel-cache")
+    if [ -f "$WORKSPACE_DIR/.local_docker_opts.sh" ]; then
+        # shellcheck disable=SC1091
+        source "$WORKSPACE_DIR/.local_docker_opts.sh"
+    fi
+fi
 DOCKER_OPTS+=(-w /workspace)
 
 BAZEL_OPTS=()

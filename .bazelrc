@@ -138,14 +138,6 @@ build:remote-cache --remote_cache_compression=true
 # of the configs above without touching the committed file.
 try-import %workspace%/.bazelrc.user
 
-# Differential Fuzzing Configuration
-build:fuzzer --config=clang
-build:fuzzer --copt=-fsanitize=fuzzer-no-link,address
-build:fuzzer --linkopt=-fsanitize=fuzzer-no-link,address
-build:fuzzer --linkopt=-rtlib=compiler-rt
-build:fuzzer --copt=-fno-omit-frame-pointer
-build:fuzzer --copt=-O2
-
 # BuildBuddy Remote Cache Configuration
 build:buildbuddy --bes_results_url=https://app.buildbuddy.io/invocation/
 build:buildbuddy --bes_backend=grpcs://remote.buildbuddy.io

@@ -2,3 +2,6 @@
 bazel-*
 scratch/
 ai/
+
+# Local developer overrides
+.local_docker_opts.sh
