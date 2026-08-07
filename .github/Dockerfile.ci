@@ -6,7 +6,7 @@
 # because the project's clang-tidy configuration references checks
 # added in clang-tidy 21.
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -62,6 +62,15 @@ RUN ARCH=$(uname -m) && \
 
 WORKDIR /workspace
 
+# Sanity check for base environment.
+RUN bazel version || true \
+    && clang --version \
+    && clang-tidy --version \
+    && clang-format --version \
+    && shellcheck --version
+
+FROM base AS msan
+
 # Build and install MSan-instrumented libc++
 RUN wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz \
     && tar -xf llvm-project-18.1.8.src.tar.xz \
@@ -83,10 +92,3 @@ RUN wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.
     && cp build/lib/libc++.a build/lib/libc++abi.a build/lib/libunwind.a build/lib/libc++experimental.a /usr/lib/llvm-18/lib/msan/ \
     && cd ../.. \
     && rm -rf llvm-project-18.1.8.src llvm-project-18.1.8.src.tar.xz
-
-# Sanity check.
-RUN bazel version || true \
-    && clang --version \
-    && clang-tidy --version \
-    && clang-format --version \
-    && shellcheck --version
