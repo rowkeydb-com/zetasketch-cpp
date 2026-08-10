@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <span>
+#include <string>
 #include <vector>
 #include "aggregator.pb.h"
 #include "hllplusplus.pb.h"
@@ -63,48 +64,55 @@ std::expected<State, utils::Error> State::Parse(
   return state;
 }
 
-std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
+namespace {
+zetasketch::AggregatorStateProto BuildProto(const State& state) {
   zetasketch::AggregatorStateProto proto;
 
-  proto.set_type(type);
-  proto.set_num_values(num_values);
+  proto.set_type(state.type);
+  proto.set_num_values(state.num_values);
 
-  if (encoding_version != 1) {  // 1 is default
-    proto.set_encoding_version(encoding_version);
+  if (state.encoding_version != 1) {  // 1 is default
+    proto.set_encoding_version(state.encoding_version);
   }
 
-  if (value_type != ValueType::kUnknown) {
-    proto.set_value_type(static_cast<int32_t>(value_type));
+  if (state.value_type != ValueType::kUnknown) {
+    proto.set_value_type(static_cast<int32_t>(state.value_type));
   }
 
   zetasketch::HyperLogLogPlusUniqueStateProto hll_proto;
 
   // Enforce Proto2 explicit-set semantics for precisions:
-  hll_proto.set_precision_or_num_buckets(precision);
-  if (sparse_precision != 0) {
-    hll_proto.set_sparse_precision_or_num_buckets(sparse_precision);
+  hll_proto.set_precision_or_num_buckets(state.precision);
+  if (state.sparse_precision != 0) {
+    hll_proto.set_sparse_precision_or_num_buckets(state.sparse_precision);
   }
 
-  if (sparse_data.has_value() && sparse_size > 0) {
-    hll_proto.set_sparse_size(sparse_size);
+  if (state.sparse_data.has_value() && state.sparse_size > 0) {
+    hll_proto.set_sparse_size(state.sparse_size);
   }
 
-  if (data.has_value() && !data->empty()) {
+  if (state.data.has_value() && !state.data->empty()) {
     hll_proto.set_data(absl::string_view(
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-        reinterpret_cast<const char*>(data->data()), data->size()));
+        reinterpret_cast<const char*>(state.data->data()), state.data->size()));
   }
 
-  if (sparse_data.has_value()) {
+  if (state.sparse_data.has_value()) {
     hll_proto.set_sparse_data(absl::string_view(
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-        reinterpret_cast<const char*>(sparse_data->data()),
-        sparse_data->size()));
+        reinterpret_cast<const char*>(state.sparse_data->data()),
+        state.sparse_data->size()));
   }
 
   proto.MutableExtension(zetasketch::hyperloglogplus_unique_state)
       ->CopyFrom(hll_proto);
 
+  return proto;
+}
+}  // namespace
+
+std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
+  auto proto = BuildProto(*this);
   std::vector<uint8_t> output;
   output.resize(proto.ByteSizeLong());
   if (!proto.SerializeToArray(output.data(), static_cast<int>(output.size()))) {
@@ -114,6 +122,18 @@ std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
   }
 
   return output;
+}
+
+std::expected<void, utils::Error> State::ToByteArray(
+    std::string* output) const {
+  auto proto = BuildProto(*this);
+  if (!proto.SerializeToString(output)) {
+    return std::unexpected(
+        utils::Error{.code = utils::ErrorCode::kProtoSerialization,
+                     .message = "Failed to serialize state"});
+  }
+
+  return {};
 }
 
 }  // namespace zetasketch::hll

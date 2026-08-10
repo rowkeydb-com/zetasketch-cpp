@@ -7,6 +7,7 @@
 #include <expected>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -215,6 +216,20 @@ int64_t HyperLogLogPlusPlus::Result() const {
 }
 
 std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::FromBytes(
+    std::string_view data) {
+  // We employ reinterpret_cast to bridge the boundary between the internal
+  // unsigned 8-bit integer type and the external character type. The standard
+  // prohibits static_cast between these pointer types. Direct conversion
+  // satisfies the constraint against temporary allocations on this execution
+  // path. The [basic.lval] clause of the C++ standard exempts character types
+  // from strict aliasing constraints, rendering this cast safe.
+  auto span = std::span<const uint8_t>(
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+      reinterpret_cast<const uint8_t*>(data.data()), data.size());
+  return FromBytes(span);
+}
+
+std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::FromBytes(
     std::span<const uint8_t> data) {
   auto state_result = hll::State::Parse(data);
   if (!state_result.has_value()) {
@@ -237,10 +252,9 @@ std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::FromBytes(
   return HyperLogLogPlusPlus(std::move(rep_result.value()));
 }
 
-std::expected<std::vector<uint8_t>, utils::Error>
-HyperLogLogPlusPlus::Serialize() const {
+std::expected<hll::State, utils::Error>
+HyperLogLogPlusPlus::GetStateForSerialization() const {
   hll::State state;
-
   if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
     state = std::get<hll::NormalRepresentation>(representation_).state();
   } else {
@@ -258,9 +272,15 @@ HyperLogLogPlusPlus::Serialize() const {
       state = std::get<hll::SparseRepresentation>(compact_res.value()).state();
     }
   }
-
   state.type = zetasketch::HYPERLOGLOG_PLUS_UNIQUE;
-  return state.ToByteArray();
+  return state;
+}
+
+std::expected<std::vector<uint8_t>, utils::Error>
+HyperLogLogPlusPlus::Serialize() const {
+  auto state_res = GetStateForSerialization();
+  if (!state_res.has_value()) return std::unexpected(state_res.error());
+  return state_res.value().ToByteArray();
 }
 
 std::expected<void, utils::Error> HyperLogLogPlusPlus::Serialize(
@@ -272,6 +292,13 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Serialize(
 
   sink = std::move(bytes_result.value());
   return {};
+}
+
+std::expected<void, utils::Error> HyperLogLogPlusPlus::Serialize(
+    std::string& sink) const {
+  auto state_res = GetStateForSerialization();
+  if (!state_res.has_value()) return std::unexpected(state_res.error());
+  return state_res.value().ToByteArray(&sink);
 }
 
 }  // namespace zetasketch

@@ -9,6 +9,7 @@
 #include <expected>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 #include "aggregator.pb.h"
 #include "zetasketch/utils/buffer_traits.h"
@@ -42,6 +43,10 @@ struct State {
   // array.
   [[nodiscard]] std::expected<std::vector<uint8_t>, utils::Error> ToByteArray()
       const;
+
+  // Serializes the internal state directly into a provided string buffer.
+  [[nodiscard]] std::expected<void, utils::Error> ToByteArray(
+      std::string* output) const;
 };
 
 }  // namespace zetasketch::hll

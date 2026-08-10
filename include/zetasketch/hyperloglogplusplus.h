@@ -8,10 +8,12 @@
 #include <cstdint>
 #include <expected>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 #include "zetasketch/hll/representation.h"
+#include "zetasketch/hll/state.h"
 #include "zetasketch/utils/buffer_traits.h"
 
 namespace zetasketch {
@@ -36,6 +38,10 @@ class HyperLogLogPlusPlus {
   static std::expected<HyperLogLogPlusPlus, utils::Error> FromBytes(
       std::span<const uint8_t> data);
 
+  // Deserializes a sketch from a string_view representation.
+  static std::expected<HyperLogLogPlusPlus, utils::Error> FromBytes(
+      std::string_view data);
+
   // This class is designated as movable, but it explicitly prohibits copy
   // operations to ensure strict memory constraints.
   HyperLogLogPlusPlus(HyperLogLogPlusPlus&& other) noexcept = default;
@@ -45,7 +51,7 @@ class HyperLogLogPlusPlus {
   HyperLogLogPlusPlus& operator=(const HyperLogLogPlusPlus&) = delete;
   ~HyperLogLogPlusPlus() = default;
 
-  // This function adds a string value to the mathematical sketch.
+  // Adds a string value to the sketch.
   void Add(std::string_view value);
 
   // Adds an integer value to the sketch.
@@ -70,9 +76,16 @@ class HyperLogLogPlusPlus {
   // Serializes into a provided buffer to avoid allocation.
   std::expected<void, utils::Error> Serialize(std::vector<uint8_t>& sink) const;
 
+  // Serializes into a provided string buffer to avoid allocation.
+  std::expected<void, utils::Error> Serialize(std::string& sink) const;
+
  private:
   explicit HyperLogLogPlusPlus(hll::Representation representation)
       : representation_(std::move(representation)) {}
+
+  // Extracts and conditionally compacts the internal state for serialization.
+  [[nodiscard]] std::expected<hll::State, utils::Error>
+  GetStateForSerialization() const;
 
   hll::Representation representation_;
 };
