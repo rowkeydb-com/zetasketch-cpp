@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 #include <gtest/gtest.h>
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 #include "zetasketch/utils/var_int.h"
 
 namespace zetasketch::utils {
@@ -33,6 +33,8 @@ TEST(DifferenceDecoderTest, EmptyReturnsNullopt) {
   std::vector<uint8_t> empty_data;
   DifferenceDecoder decoder(empty_data);
   EXPECT_FALSE(decoder.Next().has_value());
+  // An empty span is a clean end, not a failure.
+  EXPECT_FALSE(decoder.error().has_value());
 }
 
 TEST(DifferenceDecoderTest, DecodesIntegers) {
@@ -44,6 +46,32 @@ TEST(DifferenceDecoderTest, DecodesIntegers) {
   EXPECT_EQ(decoder.Next().value_or(0), 2903);
   EXPECT_EQ(decoder.Next().value_or(0), 20160531);
   EXPECT_FALSE(decoder.Next().has_value());
+}
+
+TEST(DifferenceDecoderTest, CleanEndLeavesNoError) {
+  auto values = EncodeVarInts({42, 170 - 42});
+  DifferenceDecoder decoder(values);
+  while (decoder.Next().has_value()) {
+  }
+  EXPECT_FALSE(decoder.error().has_value());
+}
+
+TEST(DifferenceDecoderTest, RecordsDecodeFailure) {
+  // One complete varint, then a final byte with its continuation bit
+  // set. Iteration ends as it would at a clean end of data, and the
+  // failure is recorded for the caller to inspect.
+  std::vector<uint8_t> data = EncodeVarInts({42});
+  data.push_back(0x80);
+  DifferenceDecoder decoder(data);
+
+  EXPECT_EQ(decoder.Next().value_or(0), 42);
+  EXPECT_FALSE(decoder.Next().has_value());
+  ASSERT_TRUE(decoder.error().has_value());
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+  EXPECT_EQ(decoder.error()->code, ErrorCode::kInvalidState);
+  // The failure persists across further calls.
+  EXPECT_FALSE(decoder.Next().has_value());
+  ASSERT_TRUE(decoder.error().has_value());
 }
 
 TEST(DifferenceEncoderTest, WritesEqualElements) {
@@ -104,6 +132,56 @@ TEST(MergedIntIteratorTest, ReturnsValuesInSortedOrder) {
 
   const std::vector<uint32_t> expected = {1, 2, 2, 3, 4, 4, 5, 6, 7};
   EXPECT_EQ(result, expected);
+  // Exhaustion is stable: querying again yields nothing.
+  EXPECT_FALSE(iter.Next().has_value());
+}
+
+TEST(MergedIntIteratorTest, PreservesDuplicatesWithinOneSide) {
+  const std::vector<uint32_t> data_a = {2, 2, 3};
+  const std::vector<uint32_t> data_b = {2, 4};
+
+  MergedIntIterator<std::vector<uint32_t>::const_iterator,
+                    std::vector<uint32_t>::const_iterator>
+      iter(data_a.begin(), data_a.end(), data_b.begin(), data_b.end());
+
+  std::vector<uint32_t> result;
+  while (auto val = iter.Next()) {
+    result.push_back(val.value());
+  }
+  const std::vector<uint32_t> expected = {2, 2, 2, 3, 4};
+  EXPECT_EQ(result, expected);
+}
+
+TEST(MergedIntIteratorTest, YieldsTheOtherSideWhenOneSideIsEmpty) {
+  const std::vector<uint32_t> empty;
+  const std::vector<uint32_t> data = {3, 5, 8};
+
+  MergedIntIterator<std::vector<uint32_t>::const_iterator,
+                    std::vector<uint32_t>::const_iterator>
+      left_empty(empty.begin(), empty.end(), data.begin(), data.end());
+  std::vector<uint32_t> from_right;
+  while (auto val = left_empty.Next()) {
+    from_right.push_back(val.value());
+  }
+  EXPECT_EQ(from_right, data);
+
+  MergedIntIterator<std::vector<uint32_t>::const_iterator,
+                    std::vector<uint32_t>::const_iterator>
+      right_empty(data.begin(), data.end(), empty.begin(), empty.end());
+  std::vector<uint32_t> from_left;
+  while (auto val = right_empty.Next()) {
+    from_left.push_back(val.value());
+  }
+  EXPECT_EQ(from_left, data);
+}
+
+TEST(MergedIntIteratorTest, EndsImmediatelyWhenBothSidesAreEmpty) {
+  const std::vector<uint32_t> empty;
+  MergedIntIterator<std::vector<uint32_t>::const_iterator,
+                    std::vector<uint32_t>::const_iterator>
+      iter(empty.begin(), empty.end(), empty.begin(), empty.end());
+  EXPECT_FALSE(iter.Next().has_value());
+  EXPECT_FALSE(iter.Next().has_value());
 }
 
 }  // namespace

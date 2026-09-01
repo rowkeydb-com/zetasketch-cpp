@@ -17,7 +17,7 @@
 #include "zetasketch/hll/normal_representation.h"
 #include "zetasketch/hll/representation.h"
 #include "zetasketch/hll/state.h"
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 #include "zetasketch/utils/iterators.h"
 
 namespace zetasketch::hll {
@@ -156,6 +156,9 @@ std::expected<void, utils::Error> SparseRepresentation::FlushBuffer() {
         last_val = val;
       }
     }
+    if (decoder.error().has_value()) {
+      return std::unexpected(decoder.error().value());
+    }
     if (last_val.has_value()) {
       auto put_res = encoder.PutInt(static_cast<int32_t>(last_val.value()));
       if (!put_res.has_value()) return std::unexpected(put_res.error());
@@ -218,6 +221,9 @@ SparseRepresentation::Normalize() && {
       }
       auto add_res = normal_repr.AddSparseValue(encoding_, *val_opt);
       if (!add_res.has_value()) return std::unexpected(add_res.error());
+    }
+    if (decoder.error().has_value()) {
+      return std::unexpected(decoder.error().value());
     }
   }
 
@@ -291,6 +297,9 @@ SparseRepresentation::MergeFromSparse(const SparseRepresentation& other) && {
     while (auto val = decoder.Next()) {
       auto res = process_val(val.value());
       if (!res.has_value()) return std::unexpected(res.error());
+    }
+    if (decoder.error().has_value()) {
+      return std::unexpected(decoder.error().value());
     }
   }
 

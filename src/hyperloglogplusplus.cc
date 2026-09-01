@@ -17,7 +17,7 @@
 #include "zetasketch/hll/normal_representation.h"
 #include "zetasketch/hll/sparse_representation.h"
 #include "zetasketch/hll/state.h"
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 #include "src/farmhash/fingerprint2011.h"
 
 namespace zetasketch {

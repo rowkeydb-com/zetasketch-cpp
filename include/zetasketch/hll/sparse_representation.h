@@ -13,7 +13,7 @@
 #include "zetasketch/hll/encoding.h"
 #include "zetasketch/hll/normal_representation.h"
 #include "zetasketch/hll/state.h"
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 
 namespace zetasketch::hll {
 

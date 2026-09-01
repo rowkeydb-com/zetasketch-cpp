@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 #include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 
 namespace zetasketch::utils {
 
@@ -22,22 +23,29 @@ class DifferenceDecoder {
  public:
   explicit DifferenceDecoder(std::span<const uint8_t> data) : reader_(data) {}
 
-  // Returns the next decoded value, or std::nullopt if at the end of the span.
-  std::optional<uint32_t> Next() {
-    if (reader_.HasRemaining()) {
-      auto result = reader_.ReadVarInt();
-      if (!result.has_value()) {
-        return std::nullopt;
-      }
-      last_ = last_ + static_cast<uint32_t>(result.value());
-      return last_;
+  // Returns the next decoded value. Returns std::nullopt when the span
+  // is exhausted, and also when decoding fails; error() distinguishes
+  // the two cases once iteration has ended.
+  [[nodiscard]] std::optional<uint32_t> Next() {
+    if (error_.has_value() || !reader_.HasRemaining()) {
+      return std::nullopt;
     }
-    return std::nullopt;
+    auto result = reader_.ReadVarInt();
+    if (!result.has_value()) {
+      error_ = result.error();
+      return std::nullopt;
+    }
+    last_ = last_ + static_cast<uint32_t>(result.value());
+    return last_;
   }
+
+  // Holds the decode failure if iteration ended on one.
+  [[nodiscard]] const std::optional<Error>& error() const { return error_; }
 
  private:
   BufferReader reader_;
   uint32_t last_{0};
+  std::optional<Error> error_;
 };
 
 class DifferenceDecoderIterator {
@@ -128,23 +136,23 @@ class MergedIntIterator {
   }
 
   std::optional<uint32_t> Next() {
-    if (peek1_.has_value() && peek2_.has_value()) {
-      if (peek1_.value() <= peek2_.value()) {
-        uint32_t val = peek1_.value();
+    if (has_peek1_ && has_peek2_) {
+      if (peek1_ <= peek2_) {
+        const uint32_t val = peek1_;
         Advance1();
         return val;
       }
-      uint32_t val = peek2_.value();
+      const uint32_t val = peek2_;
       Advance2();
       return val;
     }
-    if (peek1_.has_value()) {
-      uint32_t val = peek1_.value();
+    if (has_peek1_) {
+      const uint32_t val = peek1_;
       Advance1();
       return val;
     }
-    if (peek2_.has_value()) {
-      uint32_t val = peek2_.value();
+    if (has_peek2_) {
+      const uint32_t val = peek2_;
       Advance2();
       return val;
     }
@@ -153,20 +161,18 @@ class MergedIntIterator {
 
  private:
   void Advance1() {
-    if (iter1_ != end1_) {
+    has_peek1_ = iter1_ != end1_;
+    if (has_peek1_) {
       peek1_ = *iter1_;
       ++iter1_;
-    } else {
-      peek1_ = std::nullopt;
     }
   }
 
   void Advance2() {
-    if (iter2_ != end2_) {
+    has_peek2_ = iter2_ != end2_;
+    if (has_peek2_) {
       peek2_ = *iter2_;
       ++iter2_;
-    } else {
-      peek2_ = std::nullopt;
     }
   }
 
@@ -174,8 +180,14 @@ class MergedIntIterator {
   I1 end1_;
   I2 iter2_;
   I2 end2_;
-  std::optional<uint32_t> peek1_;
-  std::optional<uint32_t> peek2_;
+  // Each peeked value is stored as a plain value and a flag, with the
+  // value always initialized, because GCC cannot prove the guarded read
+  // of a std::optional payload initialized once Next() is inlined under
+  // optimization, and warnings are errors.
+  uint32_t peek1_ = 0;
+  uint32_t peek2_ = 0;
+  bool has_peek1_ = false;
+  bool has_peek2_ = false;
 };
 
 }  // namespace zetasketch::utils

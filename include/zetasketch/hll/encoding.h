@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 
 namespace zetasketch::hll::encoding {
 

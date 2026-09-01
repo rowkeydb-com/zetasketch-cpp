@@ -18,7 +18,7 @@
 #include "zetasketch/hll/encoding.h"
 #include "zetasketch/hll/math_utils.h"
 #include "zetasketch/hll/state.h"
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 
 namespace zetasketch::hll {
 

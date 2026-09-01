@@ -8,7 +8,7 @@
 #include "zetasketch/hll/sparse_representation.h"
 #include "zetasketch/hll/state.h"
 #include "zetasketch/hyperloglogplusplus.h"
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 
 namespace {
 
@@ -123,6 +123,156 @@ TEST(ErrorHandlingTest, SparseNormalizeInvalidSparseIndex) {
     EXPECT_EQ(norm_res.error().code,
               zetasketch::utils::ErrorCode::kInvalidState);
   }
+}
+
+TEST(ErrorHandlingTest, SparseNormalizeTruncatedVarint) {
+  State state;
+  state.precision = 10;
+  state.sparse_precision = 15;
+  // Every byte carries the continuation bit, so the varint never ends.
+  state.sparse_data = std::vector<uint8_t>{0xFF, 0xFF};
+
+  auto res = SparseRepresentation::Create(std::move(state));
+  ASSERT_TRUE(res.has_value());
+// GCC reports a maybe-uninitialized false positive on the value moved
+// out of the std::expected in the call below; the same class of
+// false positive is suppressed throughout this file.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+  auto norm_res = std::move(res.value()).Normalize();
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+  ASSERT_FALSE(norm_res.has_value());
+  EXPECT_EQ(norm_res.error().code, zetasketch::utils::ErrorCode::kInvalidState);
+}
+
+TEST(ErrorHandlingTest, SparseNormalizeVarintContinuationOnFinalByte) {
+  State state;
+  state.precision = 10;
+  state.sparse_precision = 15;
+  // A complete varint, then a final byte whose continuation bit is set.
+  state.sparse_data = std::vector<uint8_t>{0x02, 0x80};
+
+  auto res = SparseRepresentation::Create(std::move(state));
+  ASSERT_TRUE(res.has_value());
+// GCC reports a maybe-uninitialized false positive on the value moved
+// out of the std::expected in the call below; the same class of
+// false positive is suppressed throughout this file.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+  auto norm_res = std::move(res.value()).Normalize();
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+  ASSERT_FALSE(norm_res.has_value());
+  EXPECT_EQ(norm_res.error().code, zetasketch::utils::ErrorCode::kInvalidState);
+}
+
+TEST(ErrorHandlingTest, SparseNormalizeOverlongVarint) {
+  State state;
+  state.precision = 10;
+  state.sparse_precision = 15;
+  // Five continuation bytes exceed the maximum encoded length of a
+  // 32-bit value, whatever follows them.
+  state.sparse_data = std::vector<uint8_t>{0x80, 0x80, 0x80, 0x80, 0x80, 0x01};
+
+  auto res = SparseRepresentation::Create(std::move(state));
+  ASSERT_TRUE(res.has_value());
+// GCC reports a maybe-uninitialized false positive on the value moved
+// out of the std::expected in the call below; the same class of
+// false positive is suppressed throughout this file.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+  auto norm_res = std::move(res.value()).Normalize();
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+  ASSERT_FALSE(norm_res.has_value());
+  EXPECT_EQ(norm_res.error().code, zetasketch::utils::ErrorCode::kInvalidState);
+}
+
+// A serialized sketch whose envelope is valid but whose sparse data is
+// a truncated varint deserializes successfully, because deserialization
+// validates the envelope only. The defect must then surface as an error
+// from the first operation that walks the sparse data, not as an
+// out-of-bounds read.
+TEST(ErrorHandlingTest, MergeSparseReportsMalformedSparseDataInOperand) {
+  State bad;
+  bad.encoding_version = 2;
+  bad.precision = 10;
+  bad.sparse_precision = 15;
+  bad.sparse_size = 1;
+  bad.sparse_data = std::vector<uint8_t>{0x80};
+  auto bytes = bad.ToByteArray();
+  ASSERT_TRUE(bytes.has_value());
+
+  auto operand = HyperLogLogPlusPlus::FromBytes(bytes.value());
+  ASSERT_TRUE(operand.has_value());
+
+  auto target_res = HyperLogLogPlusPlus::Create(10, 15);
+  ASSERT_TRUE(target_res.has_value());
+  auto target = std::move(target_res.value());
+  auto merge_res = target.Merge(std::move(operand.value()));
+  ASSERT_FALSE(merge_res.has_value());
+  EXPECT_EQ(merge_res.error().code,
+            zetasketch::utils::ErrorCode::kInvalidState);
+}
+
+// A defective stored sparse stream must also surface when buffered
+// additions force serialization's compaction to merge with it. This is
+// the flush path, distinct from normalization and from merging.
+TEST(ErrorHandlingTest, SerializeReportsMalformedSparseDataWhenFlushing) {
+  State bad;
+  bad.encoding_version = 2;
+  bad.precision = 10;
+  bad.sparse_precision = 15;
+  bad.sparse_size = 1;
+  bad.sparse_data = std::vector<uint8_t>{0x80};
+  auto bytes = bad.ToByteArray();
+  ASSERT_TRUE(bytes.has_value());
+
+  auto sketch_res = HyperLogLogPlusPlus::FromBytes(bytes.value());
+  ASSERT_TRUE(sketch_res.has_value());
+  auto sketch = std::move(sketch_res.value());
+
+  // One buffered value: too few to flush on its own, so the walk of
+  // the stored stream happens inside serialization's compaction.
+  ASSERT_TRUE(sketch.AddHash(0x123456789ABCDEF0ULL).has_value());
+
+  auto ser = sketch.Serialize();
+  ASSERT_FALSE(ser.has_value());
+  EXPECT_EQ(ser.error().code, zetasketch::utils::ErrorCode::kInvalidState);
+}
+
+TEST(ErrorHandlingTest, MergeIntoNormalReportsMalformedSparseDataInOperand) {
+  State bad;
+  bad.encoding_version = 2;
+  bad.precision = 10;
+  bad.sparse_precision = 15;
+  bad.sparse_size = 1;
+  bad.sparse_data = std::vector<uint8_t>{0x80};
+  auto bytes = bad.ToByteArray();
+  ASSERT_TRUE(bytes.has_value());
+
+  auto operand = HyperLogLogPlusPlus::FromBytes(bytes.value());
+  ASSERT_TRUE(operand.has_value());
+
+  // A normal-representation target forces normalization of the sparse
+  // operand, which walks its sparse data.
+  auto target_res = HyperLogLogPlusPlus::Create(10, 0);
+  ASSERT_TRUE(target_res.has_value());
+  auto target = std::move(target_res.value());
+  auto merge_res = target.Merge(std::move(operand.value()));
+  ASSERT_FALSE(merge_res.has_value());
+  EXPECT_EQ(merge_res.error().code,
+            zetasketch::utils::ErrorCode::kInvalidState);
 }
 
 }  // namespace

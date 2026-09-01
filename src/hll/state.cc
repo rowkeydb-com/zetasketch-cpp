@@ -10,7 +10,7 @@
 #include <vector>
 #include "aggregator.pb.h"
 #include "hllplusplus.pb.h"
-#include "zetasketch/utils/buffer_traits.h"
+#include "zetasketch/utils/error.h"
 
 namespace zetasketch::hll {
 

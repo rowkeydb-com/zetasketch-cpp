@@ -26,6 +26,7 @@ cc_library(
     hdrs = [
         "include/zetasketch/bias_data.h",
         "include/zetasketch/core_constants.h",
+        "include/zetasketch/utils/error.h",
         "include/zetasketch/utils/var_int.h",
         "include/zetasketch/utils/buffer_traits.h",
         "include/zetasketch/utils/iterators.h",

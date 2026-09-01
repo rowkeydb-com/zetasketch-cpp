@@ -11,41 +11,28 @@
 #include <expected>
 #include <format>
 #include <span>
-#include <string>
 #include <utility>
 #include <vector>
+#include "zetasketch/utils/error.h"
 #include "zetasketch/utils/var_int.h"
 
 namespace zetasketch::utils {
-
-// This structure defines the base error enumeration for ZetaSketch operations,
-// which is equivalent to the SketchError enumeration in the Rust
-// implementation.
-enum class ErrorCode {
-  kInvalidState,
-  kIllegalArgument,
-  kIncompatiblePrecision,
-  kProtoDeserialization,
-  kProtoSerialization,
-};
-
-struct Error {
-  ErrorCode code;
-  std::string message;
-};
 
 class BufferReader {
  public:
   explicit BufferReader(std::span<const uint8_t> data) : data_(data) {}
 
-  std::expected<int32_t, Error> ReadVarInt() {
+  [[nodiscard]] std::expected<int32_t, Error> ReadVarInt() {
     if (position_ >= data_.size()) {
       return std::unexpected(Error{.code = ErrorCode::kInvalidState,
                                    .message = "No more data to read"});
     }
     auto decoded = VarInt::Get(data_.subspan(position_));
-    position_ += decoded.bytes_read;
-    return decoded.value;
+    if (!decoded.has_value()) {
+      return std::unexpected(decoded.error());
+    }
+    position_ += decoded->bytes_read;
+    return decoded->value;
   }
 
   [[nodiscard]] bool HasRemaining() const { return position_ < data_.size(); }
