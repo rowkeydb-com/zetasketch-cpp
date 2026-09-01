@@ -154,7 +154,7 @@ std::string CppCreate(int np, int sp, const std::vector<std::string>& items) {
   EXPECT_TRUE(hll_res.has_value());
   auto hll = std::move(hll_res.value());
   for (const auto& item : items) {
-    hll.Add(item);
+    EXPECT_TRUE(hll.Add(item).has_value());
   }
   auto ser = hll.Serialize();
   EXPECT_TRUE(ser.has_value());

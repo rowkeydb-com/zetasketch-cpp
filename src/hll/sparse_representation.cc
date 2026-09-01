@@ -143,6 +143,11 @@ std::expected<void, utils::Error> SparseRepresentation::FlushBuffer() {
     std::optional<uint32_t> last_val = std::nullopt;
     while (auto val = merged_iter.Next()) {
       const uint32_t idx = encoding_.DecodeSparseIndex(val.value());
+      if (idx >= (1U << static_cast<uint32_t>(state_.sparse_precision))) {
+        return std::unexpected(
+            utils::Error{.code = utils::ErrorCode::kInvalidState,
+                         .message = "Invalid sparse index out of range."});
+      }
       if (last_index.has_value() && last_index.value() == idx) {
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         last_val = std::max(last_val.value(), val.value());

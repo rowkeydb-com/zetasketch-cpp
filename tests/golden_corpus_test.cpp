@@ -120,7 +120,9 @@ TEST(GoldenCorpusTest, VerifyParity) {
           << "Failed to deserialize SKETCH " << name;
       auto sketch = std::move(sketch_or.value());
 
-      EXPECT_EQ(sketch.Result(), expected_cardinality)
+      auto estimate = sketch.Result();
+      ASSERT_TRUE(estimate.has_value()) << "Estimate failed for " << name;
+      EXPECT_EQ(estimate.value(), expected_cardinality)
           << "Cardinality mismatch for " << name;
 
       auto serialized_or = sketch.Serialize();
@@ -162,7 +164,10 @@ TEST(GoldenCorpusTest, VerifyParity) {
       auto merge_res = sketch1.Merge(std::move(sketch2));
       ASSERT_TRUE(merge_res.has_value()) << "Failed to merge " << name;
 
-      EXPECT_EQ(sketch1.Result(), expected_cardinality)
+      auto merged_estimate = sketch1.Result();
+      ASSERT_TRUE(merged_estimate.has_value())
+          << "Merged estimate failed for " << name;
+      EXPECT_EQ(merged_estimate.value(), expected_cardinality)
           << "Merged cardinality mismatch for " << name;
 
       auto serialized_or = sketch1.Serialize();

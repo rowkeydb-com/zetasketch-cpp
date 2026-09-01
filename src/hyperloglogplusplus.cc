@@ -42,25 +42,17 @@ std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::Create(
   return HyperLogLogPlusPlus(std::move(rep_res.value()));
 }
 
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-void HyperLogLogPlusPlus::Add(std::string_view value) {
+std::expected<void, utils::Error> HyperLogLogPlusPlus::Add(
+    std::string_view value) {
   const uint64_t hash = Fingerprint2011(value.data(), value.size());
-  auto res = AddHash(hash);
-  if (!res.has_value()) {
-    // Ignore error for now, as in original stub
-  }
+  return AddHash(hash);
 }
 
-// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-void HyperLogLogPlusPlus::Add(int64_t value) {
-  // Simple stub/dummy hash for testing serialization round-trip without
-  // farmhash dep here Real implementation will use farmhash and handle types
-  // properly.
+std::expected<void, utils::Error> HyperLogLogPlusPlus::Add(int64_t value) {
+  // Placeholder hash; the reference integer hash replaces it when the
+  // integer path is implemented against the Java library.
   constexpr uint64_t kDummyHashMultiplier = 0x9E3779B97F4A7C15ULL;
-  auto res = AddHash(static_cast<uint64_t>(value) * kDummyHashMultiplier);
-  if (!res.has_value()) {
-    // Ignore in stub
-  }
+  return AddHash(static_cast<uint64_t>(value) * kDummyHashMultiplier);
 }
 
 std::expected<void, utils::Error> HyperLogLogPlusPlus::AddHash(uint64_t hash) {
@@ -205,14 +197,11 @@ std::expected<void, utils::Error> HyperLogLogPlusPlus::Merge(
   return {};
 }
 
-int64_t HyperLogLogPlusPlus::Result() const {
+std::expected<int64_t, utils::Error> HyperLogLogPlusPlus::Result() const {
   if (std::holds_alternative<hll::NormalRepresentation>(representation_)) {
-    auto res = std::get<hll::NormalRepresentation>(representation_).Estimate();
-    return res.value_or(0);
+    return std::get<hll::NormalRepresentation>(representation_).Estimate();
   }
-
-  auto res = std::get<hll::SparseRepresentation>(representation_).Estimate();
-  return res.value_or(0);
+  return std::get<hll::SparseRepresentation>(representation_).Estimate();
 }
 
 std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::FromBytes(

@@ -66,7 +66,7 @@ class SparseRepresentation {
                        size_t max_buffer_elements);
 
   [[nodiscard]] std::expected<void, utils::Error> FlushBuffer();
-  std::expected<void, utils::Error> SortAndDedupBuffer();
+  [[nodiscard]] std::expected<void, utils::Error> SortAndDedupBuffer();
 
   [[nodiscard]] std::expected<Representation, utils::Error>
   UpdateRepresentation() &&;
