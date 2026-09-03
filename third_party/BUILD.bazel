@@ -1,0 +1,4 @@
+# The overlay build file for the Java reference implementation, which is
+# fetched as a source archive rather than taken from Maven; see
+# MODULE.bazel for the reason.
+exports_files(["zetasketch_java.BUILD"])

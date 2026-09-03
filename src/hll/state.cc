@@ -5,29 +5,91 @@
 #include "zetasketch/hll/state.h"
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/wire_format_lite.h>
 #include "aggregator.pb.h"
 #include "hllplusplus.pb.h"
 #include "zetasketch/utils/error.h"
 
 namespace zetasketch::hll {
+namespace {
+
+// The aggregator type's field number in the enclosing message.
+constexpr int kAggregatorTypeFieldNumber = 1;
+
+// Returns the number carried by the last aggregator type field in the
+// message, ignoring a field of that number carrying anything but a
+// variable-length integer, and returning nothing when the message
+// carries no such field.
+std::optional<int32_t> LastAggregatorTypeNumber(
+    std::span<const uint8_t> input) {
+  google::protobuf::io::CodedInputStream stream(input.data(),
+                                                static_cast<int>(input.size()));
+  std::optional<int32_t> last;
+  for (uint32_t tag = stream.ReadTag(); tag != 0; tag = stream.ReadTag()) {
+    using google::protobuf::internal::WireFormatLite;
+    if (WireFormatLite::GetTagFieldNumber(tag) == kAggregatorTypeFieldNumber &&
+        WireFormatLite::GetTagWireType(tag) ==
+            WireFormatLite::WIRETYPE_VARINT) {
+      uint64_t value = 0;
+      if (!stream.ReadVarint64(&value)) {
+        return last;
+      }
+      // The reference reads this field as a 32-bit enumeration, so a
+      // wider number is truncated rather than rejected.
+      last = static_cast<int32_t>(static_cast<uint32_t>(value));
+      continue;
+    }
+    if (!WireFormatLite::SkipField(&stream, tag)) {
+      return last;
+    }
+  }
+  return last;
+}
+
+}  // namespace
 
 std::expected<State, utils::Error> State::Parse(
     std::span<const uint8_t> input) {
   zetasketch::AggregatorStateProto proto;
-  if (!proto.ParseFromArray(input.data(), static_cast<int>(input.size()))) {
+  // The reference reads this message with a parser it wrote by hand,
+  // which enforces no required field: it accepts a sketch that carries
+  // neither an aggregator type nor a value count, and supplies its own
+  // defaults for both. Parsing partially reproduces that, and the
+  // defaults below are the reference's own.
+  if (!proto.ParsePartialFromArray(input.data(),
+                                   static_cast<int>(input.size()))) {
     return std::unexpected(
         utils::Error{.code = utils::ErrorCode::kProtoDeserialization,
                      .message = "Failed to parse state"});
   }
 
   State state;
-  state.type = proto.type();
-  state.num_values = proto.num_values();
-  state.encoding_version = proto.encoding_version();
-  state.value_type = static_cast<ValueType>(proto.value_type());
+  // The aggregator type is read from the wire rather than from the
+  // parsed message. A generated parser discards a number it does not
+  // recognise into the unknown fields, which loses both the number and
+  // its position, where the reference keeps the last field it reads,
+  // recognised or not. A field of any other wire type is skipped, as
+  // the reference skips it.
+  if (const auto number = LastAggregatorTypeNumber(input)) {
+    state.type = zetasketch::AggregatorType_IsValid(*number)
+                     ? std::optional<zetasketch::AggregatorType>(
+                           static_cast<zetasketch::AggregatorType>(*number))
+                     : std::nullopt;
+  }
+  if (proto.has_num_values()) {
+    state.num_values = proto.num_values();
+  }
+  if (proto.has_encoding_version()) {
+    state.encoding_version = proto.encoding_version();
+  }
+  if (proto.has_value_type()) {
+    state.value_type = static_cast<ValueType>(proto.value_type());
+  }
 
   if (proto.HasExtension(zetasketch::hyperloglogplus_unique_state)) {
     const auto& hll_proto =
@@ -68,7 +130,7 @@ namespace {
 zetasketch::AggregatorStateProto BuildProto(const State& state) {
   zetasketch::AggregatorStateProto proto;
 
-  proto.set_type(state.type);
+  proto.set_type(state.type.value_or(zetasketch::HYPERLOGLOG_PLUS_UNIQUE));
   proto.set_num_values(state.num_values);
 
   if (state.encoding_version != 1) {  // 1 is default
@@ -87,11 +149,16 @@ zetasketch::AggregatorStateProto BuildProto(const State& state) {
     hll_proto.set_sparse_precision_or_num_buckets(state.sparse_precision);
   }
 
-  if (state.sparse_data.has_value() && state.sparse_size > 0) {
+  // The reference emits the sparse size whenever it departs from its
+  // default, and emits each data field whenever the field is present,
+  // including when the field holds no bytes. Its read predicates
+  // require a byte, but its write predicates test only for presence,
+  // so an empty field parsed from the input reappears in the output.
+  if (state.sparse_size != 0) {
     hll_proto.set_sparse_size(state.sparse_size);
   }
 
-  if (state.data.has_value() && !state.data->empty()) {
+  if (state.data.has_value()) {
     hll_proto.set_data(absl::string_view(
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         reinterpret_cast<const char*>(state.data->data()), state.data->size()));

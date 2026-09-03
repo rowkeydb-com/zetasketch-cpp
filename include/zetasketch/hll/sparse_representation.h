@@ -46,6 +46,23 @@ class SparseRepresentation {
   // Estimates the cardinality using the sparse representation.
   [[nodiscard]] std::expected<int64_t, utils::Error> Estimate() const;
 
+  // Adds this representation's values to a normal one, as the
+  // reference's mergeInto does. It adds the stored stream and the
+  // buffer through the normal representation's sparse-value path, which
+  // touches only the registers those values name. Normalising this
+  // representation into a register array and taking a maximum over the
+  // whole of it would instead lower every register the values do not
+  // name, that maximum being over signed bytes.
+  [[nodiscard]] std::expected<void, utils::Error> MergeInto(
+      NormalRepresentation& target) const;
+
+  // Lowers this representation to the given encoding, as the
+  // reference's downgrade does, re-encoding the stored stream through
+  // the target encoding and carrying the buffer across unchanged. It
+  // returns this representation unaltered when the target is not lower.
+  [[nodiscard]] std::expected<Representation, utils::Error> Downgrade(
+      const encoding::Sparse& target) &&;
+
   // Merges another sparse representation into this one.
   [[nodiscard]] std::expected<Representation, utils::Error> MergeFromSparse(
       const SparseRepresentation& other) &&;

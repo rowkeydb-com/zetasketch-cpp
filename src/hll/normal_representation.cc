@@ -21,6 +21,37 @@
 #include "zetasketch/utils/error.h"
 
 namespace zetasketch::hll {
+namespace {
+
+// The reference shifts a signed long by a register value, and its
+// language reduces a shift count modulo the width of that type.
+constexpr uint32_t kRegisterShiftMask = 63U;
+
+// Materialises a state's register array if it is absent or holds no
+// bytes, as the reference's ensureData does. Its test is of the
+// contents, so a data field that is present and empty is replaced
+// rather than written into.
+std::vector<uint8_t>& EnsureData(State& state) {
+  if (!state.data.has_value() || state.data->empty()) {
+    return state.data.emplace(size_t{1} << static_cast<size_t>(state.precision),
+                              0);
+  }
+  return *state.data;
+}
+
+// Takes the maximum of a register and a candidate as the reference
+// does. It holds registers in an array of its language's signed byte
+// and compares them with a signed comparison, so a register at or
+// above 0x80 counts as less than every other. Sketches the reference
+// accepts can carry such a register, because it validates the length
+// of the register array and never its contents.
+void PutMax(uint8_t& target, uint8_t candidate) {
+  if (static_cast<int8_t>(target) < static_cast<int8_t>(candidate)) {
+    target = candidate;
+  }
+}
+
+}  // namespace
 
 std::expected<NormalRepresentation, utils::Error> NormalRepresentation::Create(
     State state) {
@@ -30,7 +61,9 @@ std::expected<NormalRepresentation, utils::Error> NormalRepresentation::Create(
   auto encoding = encoding::Normal::Create(state.precision);
   if (!encoding) return std::unexpected(encoding.error());
 
-  if (state.data.has_value()) {
+  // The reference checks the length only when the data field holds a
+  // byte, so a present but empty field passes construction unaltered.
+  if (state.data.has_value() && !state.data->empty()) {
     const size_t expected_size = size_t{1}
                                  << static_cast<size_t>(state.precision);
     if (state.data->size() != expected_size) {
@@ -42,8 +75,10 @@ std::expected<NormalRepresentation, utils::Error> NormalRepresentation::Create(
     }
   }
 
-  state.sparse_data.reset();
-  state.sparse_size = 0;
+  // The reference discards the sparse fields in its normalization
+  // routine alone, not on construction, and therefore preserves them
+  // when it parses a sketch that carries dense and sparse data
+  // together. See SparseRepresentation::Normalize.
   return NormalRepresentation(std::move(state), *encoding);
 }
 
@@ -64,11 +99,18 @@ NormalRepresentation::NormalRepresentation(State state,
     : state_(std::move(state)), encoding_(std::move(encoding)) {}
 
 std::vector<uint8_t>& NormalRepresentation::EnsureDataMut() {
-  if (!state_.data.has_value()) {
-    state_.data = std::vector<uint8_t>(
-        size_t{1} << static_cast<size_t>(state_.precision), 0);
-  }
-  return *state_.data;
+  return EnsureData(state_);
+}
+
+void NormalRepresentation::EnsureRegisterArray() { EnsureDataMut(); }
+
+std::expected<void, utils::Error> NormalRepresentation::BeginSparseValues(
+    const encoding::Sparse& source_sparse_encoding) {
+  auto downgraded = MaybeDowngrade(source_sparse_encoding.normal(),
+                                   source_sparse_encoding.sparse_precision());
+  if (!downgraded.has_value()) return downgraded;
+  EnsureDataMut();
+  return {};
 }
 
 std::expected<void, utils::Error> NormalRepresentation::AddHash(uint64_t hash) {
@@ -77,7 +119,7 @@ std::expected<void, utils::Error> NormalRepresentation::AddHash(uint64_t hash) {
 
   auto& data = EnsureDataMut();
   if (idx < data.size()) {
-    data[idx] = std::max(data[idx], rho_w);
+    PutMax(data[idx], rho_w);
   } else {
     return std::unexpected(utils::Error{
         .code = utils::ErrorCode::kInvalidState,
@@ -99,7 +141,10 @@ std::expected<void, utils::Error> NormalRepresentation::AddSparseValue(
 }
 
 std::expected<int64_t, utils::Error> NormalRepresentation::Estimate() const {
-  if (!state_.data.has_value()) {
+  // A present but empty register array carries no registers, so the
+  // reference reports nothing from it rather than dividing by an empty
+  // sum. Its guard tests the contents, not the presence of the field.
+  if (!state_.data.has_value() || state_.data->empty()) {
     return 0;
   }
   const auto& data = *state_.data;
@@ -108,8 +153,16 @@ std::expected<int64_t, utils::Error> NormalRepresentation::Estimate() const {
       static_cast<int32_t>(std::ranges::count(data, uint8_t{0}));
   const double sum = std::transform_reduce(
       data.begin(), data.end(), 0.0, std::plus<>(), [](uint8_t v_byte) {
-        return 1.0 / static_cast<double>(uint64_t{1}
-                                         << static_cast<uint32_t>(v_byte));
+        // The reference shifts a signed long by the register, which its
+        // language reduces modulo the width; a register at or above 64
+        // therefore selects a shift of that value's low six bits, and a
+        // shift of 63 yields the most negative long rather than a
+        // positive power. Reproducing both keeps the sum identical for
+        // register arrays the reference accepts but never writes.
+        const auto power =
+            static_cast<int64_t>(uint64_t{1} << (static_cast<uint32_t>(v_byte) &
+                                                 kRegisterShiftMask));
+        return 1.0 / static_cast<double>(power);
       });
 
   auto m = static_cast<double>(uint64_t{1}
@@ -120,14 +173,14 @@ std::expected<int64_t, utils::Error> NormalRepresentation::Estimate() const {
         static_cast<double>(LinearCountingThreshold(state_.precision));
     const double h = m * std::log(m / static_cast<double>(num_zeros));
     if (h <= linear_count_threshold) {
-      return static_cast<int64_t>(std::round(h));
+      return RoundAsTheReferenceDoes(h);
     }
   }
 
   const double raw_estimate = Alpha(state_.precision) * m * m / sum;
   const double bias_correction = EstimateBias(raw_estimate, state_.precision);
 
-  return static_cast<int64_t>(std::round(raw_estimate - bias_correction));
+  return RoundAsTheReferenceDoes(raw_estimate - bias_correction);
 }
 
 std::expected<void, utils::Error> NormalRepresentation::MergeFromNormal(
@@ -183,29 +236,23 @@ NormalRepresentation::MergeNormalDataMaybeDowngrading(
   const auto& source_data = *source_data_opt;
 
   if (target_encoding.precision() == source_encoding.precision()) {
-    if (!state.data.has_value()) {
-      state.data = std::vector<uint8_t>(
-          size_t{1} << static_cast<size_t>(state.precision), 0);
-    }
-    auto& data_slice = *state.data;
-    if (data_slice.size() == source_data.size()) {
-      for (size_t i = 0; i < data_slice.size(); ++i) {
-        data_slice[i] = std::max(data_slice[i], source_data[i]);
-      }
-    } else {
+    auto& data_slice = EnsureData(state);
+    // The reference copies the source over the target from offset zero
+    // and bounds only the source's length, so a source holding no bytes
+    // merges nothing and leaves a newly materialised target behind.
+    if (source_data.size() > data_slice.size()) {
       return std::unexpected(utils::Error{
           .code = utils::ErrorCode::kInvalidState,
           .message = "Mismatched data lengths in "
                      "MergeNormalDataMaybeDowngrading for same precision"});
     }
+    for (size_t i = 0; i < source_data.size(); ++i) {
+      PutMax(data_slice[i], source_data[i]);
+    }
     return {};
   }
 
-  if (!state.data.has_value()) {
-    state.data = std::vector<uint8_t>(
-        size_t{1} << static_cast<size_t>(state.precision), 0);
-  }
-  auto& target_array = *state.data;
+  auto& target_array = EnsureData(state);
 
   for (size_t old_index = 0; old_index < source_data.size(); ++old_index) {
     const uint8_t old_rho_w = source_data[old_index];
@@ -216,7 +263,7 @@ NormalRepresentation::MergeNormalDataMaybeDowngrading(
                                       old_rho_w, target_encoding.precision());
 
     if (new_index < target_array.size()) {
-      target_array[new_index] = std::max(target_array[new_index], new_rho_w);
+      PutMax(target_array[new_index], new_rho_w);
     } else {
       return std::unexpected(utils::Error{
           .code = utils::ErrorCode::kInvalidState,
@@ -251,7 +298,7 @@ NormalRepresentation::AddSparseValueMaybeDowngrading(
   }
 
   if (idx < data.size()) {
-    data[idx] = std::max(data[idx], rho_w);
+    PutMax(data[idx], rho_w);
   } else {
     return std::unexpected(utils::Error{
         .code = utils::ErrorCode::kInvalidState,

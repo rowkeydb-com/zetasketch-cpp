@@ -47,6 +47,10 @@ build:release --compilation_mode=opt
 # AddressSanitizer + UndefinedBehaviorSanitizer.
 build:asan-ubsan --config=clang
 build:asan-ubsan --copt=-fsanitize=address,undefined
+# Without this the undefined-behaviour sanitizer prints its diagnostic
+# and carries on, so a test that provokes undefined behaviour still
+# passes and the report is hidden by --test_output=errors.
+build:asan-ubsan --copt=-fno-sanitize-recover=all
 build:asan-ubsan --copt=-fno-omit-frame-pointer
 build:asan-ubsan --copt=-O1
 build:asan-ubsan --linkopt=-fsanitize=address,undefined

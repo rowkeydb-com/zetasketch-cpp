@@ -45,6 +45,30 @@ cc_test(
     ],
 )
 
+sh_test(
+    name = "bias_data_matches_reference_test",
+    srcs = ["check_bias_data.sh"],
+    args = [
+        "$(location //tools:check_bias_data.py)",
+        "$(location //:include/zetasketch/bias_data.h)",
+        "$(location @zetasketch_java//:data_java)",
+    ],
+    data = [
+        "//:include/zetasketch/bias_data.h",
+        "//tools:check_bias_data.py",
+        "@zetasketch_java//:data_java",
+    ],
+)
+
+cc_test(
+    name = "encoding_test",
+    srcs = ["hll/encoding_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_test(
     name = "normal_representation_test",
     srcs = ["hll/normal_representation_test.cpp"],
@@ -106,13 +130,19 @@ java_binary(
     srcs = ["ZetaSketchCli.java"],
     main_class = "ZetaSketchCli",
     deps = [
-        "@maven//:com_google_zetasketch_zetasketch",
+        "@zetasketch_java//:zetasketch",
     ],
 )
 
 cc_test(
     name = "differential_fuzzer",
     srcs = ["differential_fuzzer_test.cpp"],
+    # This target launches the reference hundreds of times: once per
+    # configuration and population for the create and merge comparisons,
+    # and once for each product driven through it. Under the memory
+    # sanitizer on a slow runner that exceeds the default timeout, which
+    # is what the declaration below raises.
+    timeout = "long",
     data = [":ZetaSketchCli"],
     args = ["--java_cli=tests/ZetaSketchCli"],
     deps = [

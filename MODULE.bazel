@@ -5,6 +5,7 @@ module(
 
 # --- clang-tidy ---
 git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 git_repository(
     name = "bazel_clang_tidy",
     commit = "496018e020cf0a7d813a2b5a9d246ec55340a7ed",
@@ -17,12 +18,37 @@ bazel_dep(name = "protobuf", version = "27.2")
 bazel_dep(name = "googletest", version = "1.14.0")
 bazel_dep(name = "rules_jvm_external", version = "6.1")
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+
+# The dependencies of the Java reference implementation, taken from its
+# own build definition. The protobuf runtime is pinned to the version
+# matching the protobuf module above, so that the generated code and the
+# runtime come from one release.
 maven.install(
     artifacts = [
-        "com.google.zetasketch:zetasketch:0.1.0",
+        "com.google.auto.value:auto-value:1.11.0",
+        "com.google.auto.value:auto-value-annotations:1.11.0",
+        "com.google.code.findbugs:jsr305:3.0.2",
+        "com.google.errorprone:error_prone_annotations:2.14.0",
+        "com.google.guava:guava:33.0.0-jre",
+        "com.google.protobuf:protobuf-java:4.27.2",
+        "it.unimi.dsi:fastutil:8.2.2",
+        "org.checkerframework:checker-qual:3.30.0",
     ],
     repositories = [
         "https://repo1.maven.org/maven2",
     ],
 )
 use_repo(maven, "maven")
+
+# The Java reference implementation, built from source rather than taken
+# from Maven. The only published artifact is 0.1.0 from 2019, which
+# enforces a minimum normal precision of 10 where this source enforces
+# 4, so a differential test against the artifact cannot establish
+# compatibility with the library Google actually publishes today.
+http_archive(
+    name = "zetasketch_java",
+    build_file = "//third_party:zetasketch_java.BUILD",
+    sha256 = "0172dc137146dbb7102c586c42d62e246064dc494a210522a0ae2a6874ae0db4",
+    strip_prefix = "zetasketch-d098c49efb5a5bc70eec89c028a38b14b930ca98",
+    urls = ["https://github.com/google/zetasketch/archive/d098c49efb5a5bc70eec89c028a38b14b930ca98.tar.gz"],
+)

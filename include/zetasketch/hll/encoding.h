@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <limits>
 #include "zetasketch/utils/error.h"
 
 namespace zetasketch::hll::encoding {
@@ -18,8 +19,21 @@ namespace zetasketch::hll::encoding {
 constexpr int32_t kHashBits = 64;
 constexpr int32_t kIndexBits = 32;
 
+// A shift count in C++ must be below the width of the promoted
+// operand, where the reference's language reduces the count modulo
+// that width instead. Masking a count with one of these reproduces
+// the reduction exactly.
+constexpr uint32_t kHashShiftMask = static_cast<uint32_t>(kHashBits - 1);
+constexpr uint32_t kIndexShiftMask = static_cast<uint32_t>(kIndexBits - 1);
+
 [[nodiscard]] inline uint8_t ComputeRhoW(uint64_t value_suffix, int32_t bits) {
-  const uint64_t w = value_suffix << static_cast<uint32_t>(kHashBits - bits);
+  // The reference shifts by kHashBits - bits, which its language
+  // reduces modulo the width. Where the sparse and normal precisions
+  // are equal, bits is zero and the shift is by the full width, which
+  // C++ leaves undefined; reducing it explicitly reproduces the
+  // reference exactly.
+  const uint64_t w = value_suffix << (static_cast<uint32_t>(kHashBits - bits) &
+                                      kHashShiftMask);
   if (w == 0) {
     return static_cast<uint8_t>(bits + 1);
   }
@@ -32,8 +46,12 @@ constexpr int32_t kIndexBits = 32;
     return rho_w;
   }
   assert(target_p < source_p);
+  // Reduced modulo the width, as the reference's language does and as
+  // ComputeRhoW above is. Equal precisions return earlier, so this is
+  // defensive rather than reachable.
   const uint32_t suffix =
-      index << static_cast<uint32_t>(kIndexBits - source_p + target_p);
+      index << (static_cast<uint32_t>(kIndexBits - source_p + target_p) &
+                kIndexShiftMask);
   if (suffix == 0) {
     return rho_w + static_cast<uint8_t>(source_p) -
            static_cast<uint8_t>(target_p);
@@ -75,7 +93,12 @@ class Normal {
   [[nodiscard]] uint32_t DowngradeIndex(uint32_t index,
                                         int32_t target_precision) const {
     assert(target_precision <= precision_);
-    return index >> static_cast<uint32_t>(precision_ - target_precision);
+    // Reduced modulo the width, as the reference's language does and as
+    // the two shifts above are. The precisions this class admits keep
+    // the difference below the width, so this is defensive rather than
+    // reachable.
+    return index >> (static_cast<uint32_t>(precision_ - target_precision) &
+                     kIndexShiftMask);
   }
 
   [[nodiscard]] uint8_t DowngradeRhoW(uint32_t index, uint8_t rho_w,
@@ -92,27 +115,56 @@ class Normal {
 
 class Sparse {
  public:
-  static constexpr int32_t kMaxSparseNormalPrecision = 24;
-  static constexpr int32_t kMaxSparsePrecision = 30;
+  // These are the limits of the encoding itself rather than of a
+  // sketch, and are named for what they bound so that they cannot be
+  // read as the sketch-level limits. An encoded value is either a
+  // sparse index below 2^sparse_precision, or the flag bit
+  // 1 << max(sparse_precision, normal_precision + 6) set above a normal
+  // index and six rho bits; either way it must remain a non-negative
+  // int32, because that is what the difference encoder writes. These
+  // are the largest precisions for which that holds, and 31 on either
+  // axis would place the flag bit in the sign bit. The limit a sketch
+  // may use is lower and is enforced above this layer: see
+  // SparseRepresentation::kMaximumSparsePrecision, which matches the
+  // reference implementation's public maximum of 25.
+  static constexpr int32_t kMaxEncodableNormalPrecision = 24;
+  static constexpr int32_t kMaxEncodableSparsePrecision = 30;
   static constexpr int32_t kRhoWBits = 6;
   static constexpr uint32_t kRhoWMask =
       (1U << static_cast<uint32_t>(kRhoWBits)) - 1;
 
+  // The widest value the encoding can produce: the flag bit above a
+  // full normal index and a full rho field. The expression grows with
+  // both precisions, so evaluating it at the maxima bounds every other
+  // configuration.
+  static constexpr uint64_t kWidestEncoding =
+      (uint64_t{1} << static_cast<uint32_t>(
+           std::max(kMaxEncodableSparsePrecision,
+                    kMaxEncodableNormalPrecision + kRhoWBits))) +
+      (uint64_t{1} << static_cast<uint32_t>(kMaxEncodableNormalPrecision +
+                                            kRhoWBits)) -
+      1;
+  static_assert(kWidestEncoding <=
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+                "the widest sparse encoding must fit in a non-negative int32");
+
   [[nodiscard]] static std::expected<Sparse, utils::Error> Create(
       int32_t normal_precision, int32_t sparse_precision) {
-    if (normal_precision < 1 || normal_precision > kMaxSparseNormalPrecision) {
+    if (normal_precision < 1 ||
+        normal_precision > kMaxEncodableNormalPrecision) {
       return std::unexpected(utils::Error{
           .code = utils::ErrorCode::kIllegalArgument,
           .message =
-              std::format("Sparse mode: normal precision must be 1-24, got {}",
-                          normal_precision)});
+              std::format("Sparse mode: normal precision must be 1-{}, got {}",
+                          kMaxEncodableNormalPrecision, normal_precision)});
     }
-    if (sparse_precision < 1 || sparse_precision > kMaxSparsePrecision) {
+    if (sparse_precision < 1 ||
+        sparse_precision > kMaxEncodableSparsePrecision) {
       return std::unexpected(utils::Error{
           .code = utils::ErrorCode::kIllegalArgument,
           .message =
-              std::format("Sparse mode: sparse precision must be 1-30, got {}",
-                          sparse_precision)});
+              std::format("Sparse mode: sparse precision must be 1-{}, got {}",
+                          kMaxEncodableSparsePrecision, sparse_precision)});
     }
     if (sparse_precision < normal_precision) {
       return std::unexpected(utils::Error{
@@ -198,14 +250,47 @@ class Sparse {
     const uint32_t old_sparse_index = DecodeSparseIndex(sparse_value);
     const uint8_t old_sparse_rho_w = DecodeSparseRhoWIfPresent(sparse_value);
 
+    // Reduced modulo the width for the same reason as the two shifts
+    // above, though unlike ComputeRhoW's this one cannot change a
+    // result: every downgrade gives a count below the width.
     const uint32_t new_sparse_index =
         old_sparse_index >>
-        static_cast<uint32_t>(sparse_precision_ - target.sparse_precision());
+        (static_cast<uint32_t>(sparse_precision_ - target.sparse_precision()) &
+         kIndexShiftMask);
     const uint8_t new_sparse_rho_w =
         DowngradeRhoW(old_sparse_index, old_sparse_rho_w, sparse_precision_,
                       target.sparse_precision());
 
     return target.EncodeParts(new_sparse_index, new_sparse_rho_w);
+  }
+
+  // Orders two sparse encodings as the reference does: one is less than
+  // another when either of its precisions is lower. Two encodings can
+  // therefore be unordered in both directions, which is what the
+  // compatibility test below refuses.
+  [[nodiscard]] bool IsLessThan(const Sparse& other) const {
+    return normal_precision_ < other.normal_precision_ ||
+           sparse_precision_ < other.sparse_precision_;
+  }
+
+  // Two sparse encodings can be merged only when one dominates the
+  // other in both precisions. A pair where one precision rises and the
+  // other falls has no common encoding to merge into, and the reference
+  // refuses it in the words reproduced here.
+  [[nodiscard]] std::expected<void, utils::Error> AssertCompatible(
+      const Sparse& other) const {
+    if ((normal_precision_ <= other.normal_precision_ &&
+         sparse_precision_ <= other.sparse_precision_) ||
+        (normal_precision_ >= other.normal_precision_ &&
+         sparse_precision_ >= other.sparse_precision_)) {
+      return {};
+    }
+    return std::unexpected(utils::Error{
+        .code = utils::ErrorCode::kIncompatiblePrecision,
+        .message = std::format(
+            "Precisions (p={}, sp={}) are not compatible to (p={}, sp={})",
+            normal_precision_, sparse_precision_, other.normal_precision_,
+            other.sparse_precision_)});
   }
 
   [[nodiscard]] Normal normal() const { return normal_encoder_; }

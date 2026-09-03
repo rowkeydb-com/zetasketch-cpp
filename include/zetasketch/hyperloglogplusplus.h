@@ -12,7 +12,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "zetasketch/hll/normal_representation.h"
 #include "zetasketch/hll/representation.h"
+#include "zetasketch/hll/sparse_representation.h"
 #include "zetasketch/hll/state.h"
 #include "zetasketch/utils/error.h"
 
@@ -20,11 +22,27 @@ namespace zetasketch {
 
 class HyperLogLogPlusPlus {
  public:
-  static constexpr int32_t kMinimumPrecision = 10;
-  static constexpr int32_t kMaximumPrecision = 24;
+  // The advertised precision limits are the limits the implementation
+  // enforces, and match the public constants of the same names in the
+  // reference implementation at revision d098c49. The published Maven
+  // artifact is older and enforces a higher minimum normal precision;
+  // the differential tests build the reference from source for that
+  // reason.
+  static constexpr int32_t kMinimumPrecision =
+      hll::NormalRepresentation::kMinimumPrecision;
+  static constexpr int32_t kMaximumPrecision =
+      hll::NormalRepresentation::kMaximumPrecision;
   static constexpr int32_t kDefaultNormalPrecision = 15;
-  static constexpr int32_t kMaximumSparsePrecision = 30;
-  static constexpr int32_t kSparsePrecisionDisabled = 0;
+  static constexpr int32_t kMaximumSparsePrecision =
+      hll::SparseRepresentation::kMaximumSparsePrecision;
+  static constexpr int32_t kSparsePrecisionDisabled =
+      hll::SparseRepresentation::kSparsePrecisionDisabled;
+  // The reference's builder adds this to the normal precision when no
+  // sparse precision is given, capping the result at the sparse
+  // maximum. Create below does not: its default disables sparse mode,
+  // so a caller who supplies neither precision gets a different sketch
+  // from the reference's default. Nothing in the library reads this
+  // constant yet.
   static constexpr int32_t kDefaultSparsePrecisionDelta = 5;
   static constexpr int32_t kEncodingVersion = 2;
 
@@ -90,24 +108,28 @@ class HyperLogLogPlusPlus {
   // promotion threshold are emitted verbatim, defective or not; a
   // stream at or past the threshold is normalized first, which walks
   // and validates it.
-  [[nodiscard]] std::expected<std::vector<uint8_t>, utils::Error> Serialize()
-      const;
+  // Serialization compacts the sketch, as the reference's does, so it
+  // is not a constant operation: a sparse sketch that compaction
+  // promotes is left promoted and estimated as a dense one afterwards.
+  [[nodiscard]] std::expected<std::vector<uint8_t>, utils::Error> Serialize();
 
   // Serializes into a provided buffer to avoid allocation.
   [[nodiscard]] std::expected<void, utils::Error> Serialize(
-      std::vector<uint8_t>& sink) const;
+      std::vector<uint8_t>& sink);
 
   // Serializes into a provided string buffer to avoid allocation.
-  [[nodiscard]] std::expected<void, utils::Error> Serialize(
-      std::string& sink) const;
+  [[nodiscard]] std::expected<void, utils::Error> Serialize(std::string& sink);
 
  private:
   explicit HyperLogLogPlusPlus(hll::Representation representation)
       : representation_(std::move(representation)) {}
 
+  // Returns the state of whichever representation is current.
+  [[nodiscard]] hll::State& MutableState();
+
   // Extracts and conditionally compacts the internal state for serialization.
   [[nodiscard]] std::expected<hll::State, utils::Error>
-  GetStateForSerialization() const;
+  GetStateForSerialization();
 
   hll::Representation representation_;
 };

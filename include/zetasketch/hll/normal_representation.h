@@ -20,7 +20,7 @@ class SparseRepresentation;
 
 class NormalRepresentation {
  public:
-  static constexpr int32_t kMinimumPrecision = 10;
+  static constexpr int32_t kMinimumPrecision = 4;
   static constexpr int32_t kMaximumPrecision = 24;
 
   [[nodiscard]] static std::expected<NormalRepresentation, utils::Error> Create(
@@ -38,6 +38,19 @@ class NormalRepresentation {
 
   // Estimates the cardinality using the dense representation.
   [[nodiscard]] std::expected<int64_t, utils::Error> Estimate() const;
+
+  // Performs what the reference's addSparseValues does before it reads
+  // any value: downgrades this representation to the source encoding
+  // and materialises the register array. It runs even for an empty
+  // sequence, which is why it is separate from AddSparseValue.
+  [[nodiscard]] std::expected<void, utils::Error> BeginSparseValues(
+      const encoding::Sparse& source_sparse_encoding);
+
+  // Materialises the register array if it is absent or holds no bytes.
+  // The reference reaches its equivalent unconditionally when a sparse
+  // representation normalises, through addSparseValues, so a sketch
+  // that normalises with nothing stored still acquires a full array.
+  void EnsureRegisterArray();
 
   // Merges another normal representation into this one.
   [[nodiscard]] std::expected<void, utils::Error> MergeFromNormal(

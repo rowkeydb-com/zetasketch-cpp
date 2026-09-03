@@ -1,0 +1,7 @@
+# The generator that writes include/zetasketch/bias_data.h from the
+# reference implementation's Data.java, and the check that the header
+# still holds those tables.
+exports_files([
+    "check_bias_data.py",
+    "generate_bias_data.py",
+])

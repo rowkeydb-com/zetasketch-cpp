@@ -100,9 +100,10 @@ class DifferenceEncoder {
 
   std::expected<void, Error> PutInt(int32_t val) {
     if (val < 0) {
-      return std::unexpected(
-          Error{.code = ErrorCode::kIllegalArgument,
-                .message = "Only positive integers are supported"});
+      return std::unexpected(Error{
+          .code = ErrorCode::kIllegalArgument,
+          .message =
+              std::format("only positive integers supported but got {}", val)});
     }
     if (last_.has_value() && val < last_.value()) {
       return std::unexpected(
