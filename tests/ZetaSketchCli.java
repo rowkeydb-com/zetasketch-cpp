@@ -1,13 +1,30 @@
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import com.google.zetasketch.HyperLogLogPlusPlus;
 import com.google.zetasketch.internal.hllplus.Data;
 import java.util.Base64;
 import java.util.Scanner;
 
 public class ZetaSketchCli {
+  // Decodes hexadecimal strictly. The length must be even and every
+  // character a hexadecimal digit; a trailing nibble is refused rather
+  // than dropped, and a sign is refused rather than accepted, because a
+  // lenient reading would merge an operand the script did not name and
+  // report nothing.
   private static byte[] parseHex(String text) {
+    if (text.length() % 2 != 0) {
+      throw new IllegalArgumentException(
+          "hexadecimal of odd length " + text.length());
+    }
     byte[] bytes = new byte[text.length() / 2];
     for (int i = 0; i < bytes.length; i++) {
-      bytes[i] = (byte) Integer.parseInt(text.substring(2 * i, 2 * i + 2), 16);
+      int high = Character.digit(text.charAt(2 * i), 16);
+      int low = Character.digit(text.charAt(2 * i + 1), 16);
+      if (high < 0 || low < 0) {
+        throw new IllegalArgumentException(
+            "not hexadecimal at offset " + (2 * i) + ": " + text);
+      }
+      bytes[i] = (byte) ((high << 4) | low);
     }
     return bytes;
   }
@@ -145,6 +162,131 @@ public class ZetaSketchCli {
           sb.append(String.format("%02x", b));
         }
         System.out.println(sb.toString());
+      }
+    } else if ("SCRIPT".equals(mode)) {
+      // Applies a sequence of commands to one sketch, so that a
+      // comparison can reach the states an operation leaves behind for
+      // the next one rather than only the state a parse produces. The
+      // builder is chosen by the type argument, as the reference fixes
+      // an aggregator's value type when it is built.
+      String type = args[1];
+      int normalPrecision = Integer.parseInt(args[2]);
+      int sparsePrecision = Integer.parseInt(args[3]);
+
+      HyperLogLogPlusPlus.Builder builder =
+          new HyperLogLogPlusPlus.Builder().normalPrecision(normalPrecision);
+      if (sparsePrecision == 0) {
+        builder.noSparseMode();
+      } else {
+        builder.sparsePrecision(sparsePrecision);
+      }
+      // The builders for text and for byte arrays are the same builder
+      // in the reference: both record the value type shared by strings
+      // and byte arrays, and the generic parameter that distinguishes
+      // them is erased here. A comparison between the two would compare
+      // an aggregator with itself.
+      HyperLogLogPlusPlus<?> built;
+      if ("strings".equals(type)) {
+        built = builder.buildForStrings();
+      } else if ("bytes".equals(type)) {
+        built = builder.buildForBytes();
+      } else if ("longs".equals(type)) {
+        built = builder.buildForLongs();
+      } else {
+        // A type that is not recognised must not fall back to any
+        // builder. A strings aggregator accepts both text and byte
+        // values, so a mistyped script would otherwise run to
+        // completion and print checkpoints that look plausible while
+        // measuring an aggregator nobody asked for.
+        System.out.println("BADINPUT unknown type " + type);
+        return;
+      }
+      @SuppressWarnings("unchecked")
+      HyperLogLogPlusPlus<Object> hll = (HyperLogLogPlusPlus<Object>) built;
+
+      Scanner scanner = new Scanner(System.in);
+      while (scanner.hasNextLine()) {
+        // Only a carriage return is stripped, never a trailing
+        // space: the space after a command is the separator, and
+        // the argument that follows it may legitimately be empty.
+        String line = scanner.nextLine();
+        while (!line.isEmpty()
+            && (line.charAt(line.length() - 1) == '\r')) {
+          line = line.substring(0, line.length() - 1);
+        }
+        if (line.isEmpty()) {
+          continue;
+        }
+        String[] parts = line.split(" ", 2);
+        String command = parts[0];
+        // A line with no separator carries no argument; a line with one
+        // may carry an empty argument, which for an addition is the
+        // empty value and is a distinct input the reference accepts.
+        boolean hasArgument = parts.length > 1;
+        String argument = hasArgument ? parts[1] : "";
+
+        // The argument is read before the library is called, and a
+        // failure to read one carries its own marker. A script the
+        // harness cannot parse is a fault in the script; a value the
+        // reference declines is a fact about the reference. Reporting
+        // both as the same thing would let a broken script read as a
+        // pinned refusal.
+        byte[] payload = null;
+        long longArgument = 0;
+        try {
+          boolean takesArgument =
+              "ADD_STRING".equals(command)
+                  || "ADD_BYTES".equals(command)
+                  || "ADD_LONG".equals(command)
+                  || "MERGE".equals(command);
+          if (takesArgument && !hasArgument) {
+            throw new IllegalArgumentException("missing argument for " + command);
+          }
+          if ("ADD_STRING".equals(command) || "ADD_BYTES".equals(command)) {
+            payload = Base64.getDecoder().decode(argument);
+          } else if ("ADD_LONG".equals(command)) {
+            longArgument = Long.parseLong(argument);
+          } else if ("MERGE".equals(command)) {
+            // An operand of no bytes cannot reach here: an argument
+            // that is absent is refused above, and hexadecimal that is
+            // present decodes to at least one byte or is refused as
+            // being of odd length.
+            payload = parseHex(argument);
+          }
+        } catch (RuntimeException e) {
+          System.out.println("BADINPUT " + e.getMessage());
+          continue;
+        }
+
+        // A command the reference refuses reports itself and the script
+        // continues, so that a refusal is as observable as a result.
+        try {
+          if ("ADD_STRING".equals(command)) {
+            // A text channel, not a byte channel: the reference hashes
+            // a string by encoding it as UTF-8, so a value that is not
+            // valid UTF-8 is replaced before it is hashed. Use
+            // ADD_BYTES to hash arbitrary bytes exactly.
+            hll.add(new String(payload, UTF_8));
+          } else if ("ADD_BYTES".equals(command)) {
+            hll.add(payload);
+          } else if ("ADD_LONG".equals(command)) {
+            hll.add(longArgument);
+          } else if ("MERGE".equals(command)) {
+            hll.merge(payload);
+          } else if ("CHECKPOINT".equals(command)) {
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hll.serializeToByteArray()) {
+              sb.append(String.format("%02x", b));
+            }
+            System.out.println(sb);
+          } else if ("RESULT".equals(command)) {
+            System.out.println(hll.result());
+          } else {
+            System.out.println("BADINPUT unknown command " + command);
+          }
+        } catch (RuntimeException e) {
+          System.out.println("ERROR " + e.getMessage());
+        }
       }
     } else if ("TRANSITION".equals(mode)) {
       // Each input line is an operation, a serialised sketch in

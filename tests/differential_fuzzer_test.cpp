@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <array>
 #include <bit>
+#include <cctype>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -71,8 +72,12 @@ uint8_t ParseHexByte(std::string_view hex_byte) {
   return static_cast<uint8_t>(val);
 }
 
-std::string RunJava(const std::string& mode, int np, int sp,
-                    const std::string& input_data) {
+// Runs the reference harness with the given arguments, feeding it the
+// text supplied and returning everything it writes to its output. The
+// arguments vary by mode, so they are passed as a list rather than as
+// a fixed mode, precision and sparse precision.
+std::string RunJavaWithArguments(const std::vector<std::string>& arguments,
+                                 const std::string& input_data) {
   if (g_java_cli.empty()) {
     ADD_FAILURE() << "JAVA_CLI path is empty";
     return "";
@@ -103,6 +108,21 @@ std::string RunJava(const std::string& mode, int np, int sp,
     unlink(input_path.data());
   };
 
+  // Built before the fork so that the child does nothing but exec. The
+  // strings own the storage the pointers refer to.
+  std::vector<std::string> owned_arguments;
+  owned_arguments.reserve(arguments.size() + 1);
+  owned_arguments.push_back(g_java_cli);
+  for (const std::string& argument : arguments) {
+    owned_arguments.push_back(argument);
+  }
+  std::vector<char*> argv;
+  argv.reserve(owned_arguments.size() + 1);
+  for (std::string& argument : owned_arguments) {
+    argv.push_back(argument.data());
+  }
+  argv.push_back(nullptr);
+
   std::array<int, 2> outpipefd{};
   if (pipe(outpipefd.data()) == -1) {
     ADD_FAILURE() << "outpipe failed: " << errno;
@@ -128,21 +148,7 @@ std::string RunJava(const std::string& mode, int np, int sp,
     if (dup2(outpipefd[1], STDOUT_FILENO) == -1) _exit(1);
     close(outpipefd[1]);
 
-    const std::string np_str = std::to_string(np);
-    const std::string sp_str = std::to_string(sp);
-
-    std::vector<char*> args;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    args.push_back(const_cast<char*>(g_java_cli.c_str()));
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    args.push_back(const_cast<char*>(mode.c_str()));
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    args.push_back(const_cast<char*>(np_str.c_str()));
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-    args.push_back(const_cast<char*>(sp_str.c_str()));
-    args.push_back(nullptr);
-
-    execv(g_java_cli.c_str(), args.data());
+    execv(g_java_cli.c_str(), argv.data());
     std::cerr << "execv failed: " << errno << "\n";
     _exit(1);
   }
@@ -167,18 +173,68 @@ std::string RunJava(const std::string& mode, int np, int sp,
   }
   close(outpipefd[0]);
 
-  int wstatus = 0;
-  waitpid(pid, &wstatus, 0);
-
-  // NOLINTNEXTLINE(misc-include-cleaner)
-  if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
-    ADD_FAILURE() << "Java process exited with error";
+  std::string invocation;
+  for (const std::string& argument : arguments) {
+    invocation += invocation.empty() ? argument : " " + argument;
   }
 
+  int wstatus = 0;
+  if (waitpid(pid, &wstatus, 0) == -1) {
+    ADD_FAILURE() << "waiting for the reference harness failed for '"
+                  << invocation << "': " << errno;
+    // NOLINTNEXTLINE(misc-include-cleaner)
+  } else if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
+    ADD_FAILURE() << "the reference harness failed for '" << invocation
+                  << "', wait status " << wstatus;
+  }
+
+  return result;
+}
+
+std::string RunJava(const std::string& mode, int np, int sp,
+                    const std::string& input_data) {
+  std::string result = RunJavaWithArguments(
+      {mode, std::to_string(np), std::to_string(sp)}, input_data);
   while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) {
     result.pop_back();
   }
   return result;
+}
+
+// Encodes a value the way the scripted harness expects its arguments,
+// so that a value carrying a space or a newline survives the line-based
+// command format.
+std::string EncodeBase64(std::string_view value) {
+  static constexpr std::string_view kAlphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string encoded;
+  encoded.reserve(((value.size() + 2) / 3) * 4);
+  size_t index = 0;
+  while (index + 2 < value.size()) {
+    const uint32_t triple =
+        (static_cast<uint32_t>(static_cast<uint8_t>(value[index])) << 16U) |
+        (static_cast<uint32_t>(static_cast<uint8_t>(value[index + 1])) << 8U) |
+        static_cast<uint32_t>(static_cast<uint8_t>(value[index + 2]));
+    encoded.push_back(kAlphabet[(triple >> 18U) & 0x3FU]);
+    encoded.push_back(kAlphabet[(triple >> 12U) & 0x3FU]);
+    encoded.push_back(kAlphabet[(triple >> 6U) & 0x3FU]);
+    encoded.push_back(kAlphabet[triple & 0x3FU]);
+    index += 3;
+  }
+  const size_t remaining = value.size() - index;
+  if (remaining > 0) {
+    uint32_t triple = static_cast<uint32_t>(static_cast<uint8_t>(value[index]))
+                      << 16U;
+    if (remaining == 2) {
+      triple |= static_cast<uint32_t>(static_cast<uint8_t>(value[index + 1]))
+                << 8U;
+    }
+    encoded.push_back(kAlphabet[(triple >> 18U) & 0x3FU]);
+    encoded.push_back(kAlphabet[(triple >> 12U) & 0x3FU]);
+    encoded.push_back(remaining == 2 ? kAlphabet[(triple >> 6U) & 0x3FU] : '=');
+    encoded.push_back('=');
+  }
+  return encoded;
 }
 
 std::string CppCreate(int np, int sp, const std::vector<std::string>& items) {
@@ -253,11 +309,23 @@ TEST(ReferenceLibraryTest, AcceptsTheMinimumNormalPrecisionOfFour) {
 
 // Splits one line of the transition harness's report, whose fields are
 // the verdict, the cardinality and the bytes, separated by tabs.
-// Decodes a sketch the harness reported as hexadecimal.
+// Decodes a sketch the harness reported as hexadecimal, as strictly as
+// the harness itself reads one: an odd length or a character outside
+// the hexadecimal digits is a failure rather than a silent truncation,
+// so that the two halves of the apparatus agree on what is readable.
 std::vector<uint8_t> ParseHexString(std::string_view hex) {
   std::vector<uint8_t> bytes;
+  if (hex.size() % 2 != 0) {
+    ADD_FAILURE() << "hexadecimal of odd length " << hex.size();
+    return bytes;
+  }
   bytes.reserve(hex.size() / 2);
   for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+    if (std::isxdigit(static_cast<unsigned char>(hex[i])) == 0 ||
+        std::isxdigit(static_cast<unsigned char>(hex[i + 1])) == 0) {
+      ADD_FAILURE() << "not hexadecimal at offset " << i << ": " << hex;
+      return bytes;
+    }
     bytes.push_back(ParseHexByte(hex.substr(i, 2)));
   }
   return bytes;
@@ -277,6 +345,27 @@ std::vector<std::string> SplitOnTabs(const std::string& line) {
   }
 }
 
+// Splits into lines, keeping an empty one. The scripted harness reports
+// one line per command that produces output and its caller pairs those
+// lines with commands by position, so discarding an empty line would
+// shift every line after it and compare the wrong pair.
+std::vector<std::string> SplitLinesKeepingEmpty(const std::string& text) {
+  std::vector<std::string> lines;
+  if (text.empty()) {
+    return lines;
+  }
+  size_t start = 0;
+  while (true) {
+    const size_t newline = text.find('\n', start);
+    if (newline == std::string::npos) {
+      lines.push_back(text.substr(start));
+      return lines;
+    }
+    lines.push_back(text.substr(start, newline - start));
+    start = newline + 1;
+  }
+}
+
 std::vector<std::string> SplitLines(const std::string& text) {
   std::vector<std::string> lines;
   std::istringstream stream(text);
@@ -287,6 +376,27 @@ std::vector<std::string> SplitLines(const std::string& text) {
     }
   }
   return lines;
+}
+
+// Runs a script against the reference harness. The type selects which
+// of the reference's builders makes the sketch, and the commands are
+// applied in order; the lines returned are what the script's
+// checkpoints and estimates printed, plus a marker for any command the
+// reference refused.
+std::vector<std::string> RunScript(const std::string& type, int np, int sp,
+                                   const std::vector<std::string>& commands) {
+  std::string input_data;
+  for (const std::string& command : commands) {
+    input_data += command + "\n";
+  }
+  std::string output = RunJavaWithArguments(
+      {"SCRIPT", type, std::to_string(np), std::to_string(sp)}, input_data);
+  // Only the newline that terminates the final line is removed, so that
+  // a final line which is empty is kept like any other.
+  if (!output.empty() && output.back() == '\n') {
+    output.pop_back();
+  }
+  return SplitLinesKeepingEmpty(output);
 }
 
 // Which estimator is used is decided by the linear counting estimate
@@ -786,6 +896,462 @@ TEST(ReferenceLibraryTest, MergesAcrossPrecisionsAgreeWithTheReference) {
       EXPECT_EQ(PrintHex(written.value()), fields.at(2)) << context;
     }
   }
+}
+
+// The scripted harness has to reach the same sketch as the create mode
+// for the same values, or nothing measured through it can be trusted.
+// The create mode adds each value as text, so the text channel is what
+// is compared against it; this library's own addition hashes the bytes
+// it is given, so the byte channel is what is compared against that.
+// The two channels coincide for the values used here and part company
+// for values that are not text, which the next comparison pins.
+TEST(ReferenceLibraryTest, TheScriptedHarnessAgreesWithTheCreateMode) {
+  const std::vector<std::pair<int, int>> configurations = {
+      {15, 20}, {10, 0}, {4, 9}, {4, 4}};
+  // For the values these tests add, populations 11 and 12 at precision 4
+  // fall where writing the sketch out promotes it, so the estimate that
+  // follows the write differs from the one that would precede it.
+  // Promotion is decided by the encoded size of the sparse stream, not
+  // by the count, so the window belongs to these values.
+  const std::vector<int> populations = {0, 1, 11, 12, 100, 1000};
+
+  for (const auto& configuration : configurations) {
+    const int normal_precision = configuration.first;
+    const int sparse_precision = configuration.second;
+    for (const int population : populations) {
+      auto [items, input_data] = MakeItems("script_", population);
+      const std::string context =
+          std::format("precision {} sparse {} population {}", normal_precision,
+                      sparse_precision, population);
+
+      const std::string created =
+          RunJava("CREATE", normal_precision, sparse_precision, input_data);
+
+      std::vector<std::string> as_text;
+      std::vector<std::string> as_bytes;
+      as_text.reserve(items.size() + 2);
+      as_bytes.reserve(items.size() + 2);
+      for (const std::string& item : items) {
+        as_text.push_back("ADD_STRING " + EncodeBase64(item));
+        as_bytes.push_back("ADD_BYTES " + EncodeBase64(item));
+      }
+      for (std::vector<std::string>* script : {&as_text, &as_bytes}) {
+        script->emplace_back("CHECKPOINT");
+        script->emplace_back("RESULT");
+      }
+
+      const std::vector<std::string> scripted_text =
+          RunScript("strings", normal_precision, sparse_precision, as_text);
+      ASSERT_EQ(scripted_text.size(), 2U) << context;
+      EXPECT_EQ(scripted_text.at(0), created) << context;
+
+      const std::vector<std::string> scripted_bytes =
+          RunScript("strings", normal_precision, sparse_precision, as_bytes);
+      ASSERT_EQ(scripted_bytes.size(), 2U) << context;
+
+      // The values here are text, so the two channels reach the same
+      // sketch and must report the same estimate; the comparison that
+      // follows pins where they part company.
+      EXPECT_EQ(scripted_text.at(1), scripted_bytes.at(1)) << context;
+
+      // The script writes the sketch out before it estimates, and
+      // writing compacts, so the same two operations are performed here
+      // in the same order. Estimating first would compare an estimate
+      // taken from a different representation.
+      auto ours = zetasketch::HyperLogLogPlusPlus::Create(normal_precision,
+                                                          sparse_precision);
+      ASSERT_TRUE(ours.has_value()) << context;
+      for (const std::string& item : items) {
+        ASSERT_TRUE(ours.value().Add(item).has_value()) << context;
+      }
+      auto written = ours.value().Serialize();
+      ASSERT_TRUE(written.has_value()) << context;
+      EXPECT_EQ(PrintHex(written.value()), scripted_bytes.at(0)) << context;
+      auto estimate = ours.value().Result();
+      ASSERT_TRUE(estimate.has_value()) << context;
+      EXPECT_EQ(std::to_string(estimate.value()), scripted_bytes.at(1))
+          << context;
+    }
+  }
+}
+
+// The reference hashes a string by encoding it as UTF-8, so a value
+// that is not valid UTF-8 is replaced before it is hashed and two
+// distinct values can collapse into one. It hashes a byte array
+// exactly. This library's addition hashes the bytes it is given, so the
+// byte channel is the one that corresponds to it, and a comparison
+// routed through the text channel would agree only by accident of every
+// value being text. Both facts are pinned here.
+TEST(ReferenceLibraryTest, TheByteChannelHashesValuesThatAreNotText) {
+  const std::vector<std::string> values = {
+      std::string("\xff"),
+      std::string("\xfe"),
+      std::string("\x80\x41"),
+      std::string("\xc3\x28"),
+      std::string("\x00\xff\x41", 3),
+      std::string("\xed\xa0\x80"),
+  };
+  constexpr int kNormalPrecision = 10;
+  constexpr int kSparsePrecision = 15;
+
+  std::vector<std::string> as_bytes;
+  std::vector<std::string> as_text;
+  for (const std::string& value : values) {
+    as_bytes.push_back("ADD_BYTES " + EncodeBase64(value));
+    as_text.push_back("ADD_STRING " + EncodeBase64(value));
+  }
+  as_bytes.emplace_back("CHECKPOINT");
+  as_text.emplace_back("CHECKPOINT");
+
+  const std::vector<std::string> scripted_bytes =
+      RunScript("bytes", kNormalPrecision, kSparsePrecision, as_bytes);
+  const std::vector<std::string> scripted_text =
+      RunScript("strings", kNormalPrecision, kSparsePrecision, as_text);
+  ASSERT_EQ(scripted_bytes.size(), 1U);
+  ASSERT_EQ(scripted_text.size(), 1U);
+
+  auto ours = zetasketch::HyperLogLogPlusPlus::Create(kNormalPrecision,
+                                                      kSparsePrecision);
+  ASSERT_TRUE(ours.has_value());
+  for (const std::string& value : values) {
+    ASSERT_TRUE(ours.value().Add(value).has_value());
+  }
+  auto written = ours.value().Serialize();
+  ASSERT_TRUE(written.has_value());
+  EXPECT_EQ(PrintHex(written.value()), scripted_bytes.at(0));
+
+  // Every value here is invalid UTF-8, so the text channel replaces it
+  // and reaches a different sketch. Were the two equal, the byte
+  // channel would not be measuring what it claims to.
+  EXPECT_NE(scripted_bytes.at(0), scripted_text.at(0));
+}
+
+// Writing a sketch out compacts it, and compaction can promote a sparse
+// sketch to a dense one, so an estimate taken after a write need not
+// equal one taken before it. For the values added here, the populations
+// below fall where the two differ at precision 4, which is what makes
+// this an observation rather than an assertion about the code. Were the
+// values to change, the window would move and the first expectation
+// below would fail rather than pass by accident.
+TEST(ReferenceLibraryTest, WritingBeforeEstimatingChangesTheEstimate) {
+  constexpr int kNormalPrecision = 4;
+  constexpr int kSparsePrecision = 9;
+
+  for (const int population : {11, 12}) {
+    auto [items, unused_input] = MakeItems("script_", population);
+    std::vector<std::string> additions;
+    additions.reserve(items.size());
+    for (const std::string& item : items) {
+      additions.push_back("ADD_BYTES " + EncodeBase64(item));
+    }
+
+    std::vector<std::string> write_first = additions;
+    write_first.emplace_back("CHECKPOINT");
+    write_first.emplace_back("RESULT");
+    std::vector<std::string> estimate_first = additions;
+    estimate_first.emplace_back("RESULT");
+    estimate_first.emplace_back("CHECKPOINT");
+
+    const std::vector<std::string> after =
+        RunScript("strings", kNormalPrecision, kSparsePrecision, write_first);
+    const std::vector<std::string> before = RunScript(
+        "strings", kNormalPrecision, kSparsePrecision, estimate_first);
+    ASSERT_EQ(after.size(), 2U) << population;
+    ASSERT_EQ(before.size(), 2U) << population;
+    EXPECT_NE(after.at(1), before.at(0)) << population;
+
+    auto written_then_estimated = zetasketch::HyperLogLogPlusPlus::Create(
+        kNormalPrecision, kSparsePrecision);
+    ASSERT_TRUE(written_then_estimated.has_value()) << population;
+    auto estimated_then_written = zetasketch::HyperLogLogPlusPlus::Create(
+        kNormalPrecision, kSparsePrecision);
+    ASSERT_TRUE(estimated_then_written.has_value()) << population;
+    for (const std::string& item : items) {
+      ASSERT_TRUE(written_then_estimated.value().Add(item).has_value())
+          << population;
+      ASSERT_TRUE(estimated_then_written.value().Add(item).has_value())
+          << population;
+    }
+
+    ASSERT_TRUE(written_then_estimated.value().Serialize().has_value())
+        << population;
+    auto after_ours = written_then_estimated.value().Result();
+    ASSERT_TRUE(after_ours.has_value()) << population;
+    EXPECT_EQ(std::to_string(after_ours.value()), after.at(1)) << population;
+
+    auto before_ours = estimated_then_written.value().Result();
+    ASSERT_TRUE(before_ours.has_value()) << population;
+    EXPECT_EQ(std::to_string(before_ours.value()), before.at(0)) << population;
+  }
+}
+
+// A merge in the middle of a script is the operation this harness was
+// written to reach: it leaves a state behind that the next command
+// observes, and a merge that writes the right bytes can still leave the
+// wrong state. The operands below are the reference's own, one of the
+// same configuration and one of a lower precision, which the merge must
+// lower into.
+TEST(ReferenceLibraryTest, MergingInsideAScriptAgreesWithTheReference) {
+  constexpr int kNormalPrecision = 10;
+  constexpr int kSparsePrecision = 15;
+  const std::vector<std::pair<int, int>> operand_configurations = {{10, 15},
+                                                                   {4, 9}};
+
+  for (const auto& operand_configuration : operand_configurations) {
+    auto [operand_items, operand_input] = MakeItems("operand_", 200);
+    const std::string operand =
+        RunJava("CREATE", operand_configuration.first,
+                operand_configuration.second, operand_input);
+    ASSERT_FALSE(operand.empty());
+    const std::string context =
+        std::format("operand precision {} sparse {}",
+                    operand_configuration.first, operand_configuration.second);
+
+    auto [items, unused_input] = MakeItems("receiver_", 300);
+    std::vector<std::string> script;
+    for (const std::string& item : items) {
+      script.push_back("ADD_BYTES " + EncodeBase64(item));
+    }
+    script.emplace_back("CHECKPOINT");
+    script.push_back("MERGE " + operand);
+    script.emplace_back("CHECKPOINT");
+    script.emplace_back("RESULT");
+
+    const std::vector<std::string> scripted =
+        RunScript("strings", kNormalPrecision, kSparsePrecision, script);
+    ASSERT_EQ(scripted.size(), 3U) << context;
+
+    auto ours = zetasketch::HyperLogLogPlusPlus::Create(kNormalPrecision,
+                                                        kSparsePrecision);
+    ASSERT_TRUE(ours.has_value()) << context;
+    for (const std::string& item : items) {
+      ASSERT_TRUE(ours.value().Add(item).has_value()) << context;
+    }
+    auto before_merge = ours.value().Serialize();
+    ASSERT_TRUE(before_merge.has_value()) << context;
+    EXPECT_EQ(PrintHex(before_merge.value()), scripted.at(0)) << context;
+
+    auto operand_sketch =
+        zetasketch::HyperLogLogPlusPlus::FromBytes(ParseHexString(operand));
+    ASSERT_TRUE(operand_sketch.has_value()) << context;
+    ASSERT_TRUE(
+        ours.value().Merge(std::move(operand_sketch.value())).has_value())
+        << context;
+
+    auto after_merge = ours.value().Serialize();
+    ASSERT_TRUE(after_merge.has_value()) << context;
+    EXPECT_EQ(PrintHex(after_merge.value()), scripted.at(1)) << context;
+    auto estimate = ours.value().Result();
+    ASSERT_TRUE(estimate.has_value()) << context;
+    EXPECT_EQ(std::to_string(estimate.value()), scripted.at(2)) << context;
+  }
+}
+
+// A script's checkpoints are the sketch as it stood at each point, in
+// order, which is what lets a comparison see the state one operation
+// leaves behind for the next. Each checkpoint here must equal the
+// create mode's output for the values added up to it.
+TEST(ReferenceLibraryTest, TheScriptedHarnessReturnsCheckpointsInOrder) {
+  constexpr int kNormalPrecision = 10;
+  constexpr int kSparsePrecision = 15;
+  const std::vector<int> stops = {0, 1, 17, 300, 900};
+
+  auto [items, unused_input] = MakeItems("stepped_", stops.back());
+  std::vector<std::string> commands;
+  size_t added = 0;
+  for (const int stop : stops) {
+    for (; std::cmp_less(added, stop); ++added) {
+      commands.push_back("ADD_STRING " + EncodeBase64(items.at(added)));
+    }
+    commands.emplace_back("CHECKPOINT");
+  }
+
+  const std::vector<std::string> checkpoints =
+      RunScript("strings", kNormalPrecision, kSparsePrecision, commands);
+  ASSERT_EQ(checkpoints.size(), stops.size());
+
+  for (size_t i = 0; i < stops.size(); ++i) {
+    const std::vector<std::string> prefix(
+        items.begin(),
+        std::next(items.begin(), static_cast<std::ptrdiff_t>(stops.at(i))));
+    std::string prefix_input;
+    for (const std::string& item : prefix) {
+      prefix_input += item + "\n";
+    }
+    EXPECT_EQ(checkpoints.at(i), RunJava("CREATE", kNormalPrecision,
+                                         kSparsePrecision, prefix_input))
+        << "after " << stops.at(i) << " additions";
+  }
+}
+
+// A command the reference refuses reports itself and the script carries
+// on, so that a refusal is as observable as a result and one refusal
+// does not discard the rest of the script. An argument the harness
+// cannot read carries a different marker, because a script that cannot
+// be parsed is a fault in the script rather than a fact about the
+// reference, and a comparison that confused the two would read a broken
+// script as a pinned refusal. The set of additions an aggregator admits
+// narrows with its first addition, to strings or to byte arrays, and
+// that narrowing is invisible in the bytes the aggregator writes; the
+// refusal message is the only place it can be observed, so both
+// narrowings and the set before any narrowing are pinned here. The four
+// messages naming an aggregator's type set are the reference library's
+// own; the two reporting an unreadable number or base64 belong to the
+// language's own library, and the rest are the harness reporting a
+// script it cannot carry out.
+TEST(ReferenceLibraryTest, TheScriptedHarnessSeparatesRefusalsFromBadInput) {
+  struct Case {
+    const char* description;
+    const char* type;
+    std::vector<std::string> commands;
+    std::vector<std::string> expected;
+  };
+  const std::string letter = EncodeBase64("a");
+  const std::string operand = RunJava("CREATE", 4, 0, "x\ny\n");
+  // One expectation below is the length of this operand plus a nibble,
+  // so an operand that failed to arrive would make that expectation
+  // meaningless rather than failing.
+  ASSERT_FALSE(operand.empty());
+  ASSERT_EQ(operand.size() % 2, 0U);
+  const std::vector<Case> cases = {
+      {.description = "a text sketch narrowed to strings refuses a long",
+       .type = "strings",
+       .commands = {"ADD_STRING " + letter, "ADD_LONG 7",
+                    "ADD_STRING " + letter, "RESULT"},
+       .expected = {"ERROR unable to add type LONG to aggregator of type "
+                    "[STRING]",
+                    "1"}},
+      {.description = "a text sketch narrowed to byte arrays refuses a long",
+       .type = "strings",
+       .commands = {"ADD_BYTES " + letter, "ADD_LONG 7", "RESULT"},
+       .expected = {"ERROR unable to add type LONG to aggregator of type "
+                    "[BYTES]",
+                    "1"}},
+      {.description = "a text sketch before any addition admits both",
+       .type = "bytes",
+       .commands = {"ADD_LONG 7", "RESULT"},
+       .expected = {"ERROR unable to add type LONG to aggregator of type "
+                    "[STRING, BYTES]",
+                    "0"}},
+      {.description = "a longs sketch refuses a string",
+       .type = "longs",
+       .commands = {"ADD_LONG 7", "ADD_STRING " + letter, "RESULT"},
+       .expected = {"ERROR unable to add type STRING to aggregator of type "
+                    "[LONG]",
+                    "1"}},
+      {.description = "arguments the harness cannot read",
+       .type = "strings",
+       .commands = {"ADD_STRING !!!!", "ADD_LONG notanumber", "MERGE",
+                    "MERGE " + operand + "a", "MERGE -1", "MERGE 0",
+                    "ADD_BYTES", "ADD_STRING " + letter, "RESULT"},
+       .expected = {"BADINPUT Illegal base64 character 21",
+                    "BADINPUT For input string: \"notanumber\"",
+                    "BADINPUT missing argument for MERGE",
+                    std::format("BADINPUT hexadecimal of odd length {}",
+                                operand.size() + 1),
+                    "BADINPUT not hexadecimal at offset 0: -1",
+                    "BADINPUT hexadecimal of odd length 1",
+                    "BADINPUT missing argument for ADD_BYTES", "1"}},
+      {.description = "the empty value, which an absent argument is not",
+       .type = "strings",
+       .commands = {"ADD_STRING ", "RESULT", "ADD_STRING", "RESULT"},
+       .expected = {"1", "BADINPUT missing argument for ADD_STRING", "1"}},
+      {.description = "an unknown command",
+       .type = "strings",
+       .commands = {"NOT_A_COMMAND", "ADD_STRING " + letter, "RESULT"},
+       .expected = {"BADINPUT unknown command NOT_A_COMMAND", "1"}},
+      {.description = "an unknown type ends the script with its marker",
+       .type = "Longs",
+       .commands = {"ADD_LONG 7", "CHECKPOINT", "RESULT"},
+       .expected = {"BADINPUT unknown type Longs"}},
+  };
+
+  for (const Case& test_case : cases) {
+    EXPECT_EQ(RunScript(test_case.type, 4, 0, test_case.commands),
+              test_case.expected)
+        << test_case.description;
+  }
+}
+
+// One sketch carried through every kind of operation in turn, with the
+// bytes and the estimate compared against the reference at each point.
+// The receiver is promoted by its first write and stays dense, so the
+// additions and merges that follow act on a dense sketch; one operand
+// is of the receiver's own configuration and one is of a lower
+// precision. The operand of the sketch's own configuration is merged
+// twice and the lower-precision one once, and the order is chosen so
+// that an addition follows a write, a merge, and an estimate, and a
+// merge follows a merge.
+TEST(ReferenceLibraryTest, ALongSequenceOfOperationsAgreesWithTheReference) {
+  constexpr int kNormalPrecision = 4;
+  constexpr int kSparsePrecision = 9;
+  auto [same_items, same_input] = MakeItems("same_", 30);
+  auto [lower_items, lower_input] = MakeItems("lower_", 30);
+  const std::string same = RunJava("CREATE", 4, 9, same_input);
+  const std::string lower = RunJava("CREATE", 4, 4, lower_input);
+  ASSERT_FALSE(same.empty());
+  ASSERT_FALSE(lower.empty());
+
+  auto [items, unused_input] = MakeItems("sequence_", 21);
+  struct Step {
+    const char* command;
+    int add_count;
+    const std::string* operand;
+  };
+  // Each add_count is how many further values the step adds.
+  const std::vector<Step> steps = {
+      {"ADD", 11, nullptr},   {"CHECKPOINT", 0, nullptr},
+      {"ADD", 5, nullptr},    {"CHECKPOINT", 0, nullptr},
+      {"MERGE", 0, &same},    {"CHECKPOINT", 0, nullptr},
+      {"ADD", 3, nullptr},    {"RESULT", 0, nullptr},
+      {"ADD", 2, nullptr},    {"MERGE", 0, &lower},
+      {"MERGE", 0, &same},    {"CHECKPOINT", 0, nullptr},
+      {"RESULT", 0, nullptr}, {"CHECKPOINT", 0, nullptr},
+  };
+
+  std::vector<std::string> script;
+  size_t added = 0;
+  for (const Step& step : steps) {
+    if (std::string_view(step.command) == "ADD") {
+      for (int i = 0; i < step.add_count; ++i) {
+        script.push_back("ADD_BYTES " + EncodeBase64(items.at(added++)));
+      }
+    } else if (std::string_view(step.command) == "MERGE") {
+      script.push_back("MERGE " + *step.operand);
+    } else {
+      script.emplace_back(step.command);
+    }
+  }
+  const std::vector<std::string> scripted =
+      RunScript("strings", kNormalPrecision, kSparsePrecision, script);
+
+  auto ours = zetasketch::HyperLogLogPlusPlus::Create(kNormalPrecision,
+                                                      kSparsePrecision);
+  ASSERT_TRUE(ours.has_value());
+  std::vector<std::string> mirrored;
+  added = 0;
+  for (const Step& step : steps) {
+    const std::string_view command(step.command);
+    if (command == "ADD") {
+      for (int i = 0; i < step.add_count; ++i) {
+        ASSERT_TRUE(ours.value().Add(items.at(added++)).has_value());
+      }
+    } else if (command == "MERGE") {
+      auto operand = zetasketch::HyperLogLogPlusPlus::FromBytes(
+          ParseHexString(*step.operand));
+      ASSERT_TRUE(operand.has_value());
+      ASSERT_TRUE(ours.value().Merge(std::move(operand.value())).has_value());
+    } else if (command == "CHECKPOINT") {
+      auto written = ours.value().Serialize();
+      ASSERT_TRUE(written.has_value());
+      mirrored.push_back(PrintHex(written.value()));
+    } else {
+      auto estimate = ours.value().Result();
+      ASSERT_TRUE(estimate.has_value());
+      mirrored.push_back(std::to_string(estimate.value()));
+    }
+  }
+  EXPECT_EQ(mirrored, scripted);
 }
 
 class DifferentialFuzzerTest
