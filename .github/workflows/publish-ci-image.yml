@@ -1,0 +1,62 @@
+name: Publish CI Image
+
+# Builds the CI container image and publishes it to the repository's
+# container registry, so that the twelve jobs of the other workflows
+# pull a prebuilt image instead of each building its own. Building it
+# per job meant every job fetched the analysis tools from a third-party
+# package host, and a single unreachable moment there failed a job that
+# had not yet compiled a line of the project.
+#
+# The image is tagged by a hash of the Dockerfile, so a change to that
+# file yields a new tag and no consumer can silently use a stale image.
+# Each architecture is built on a runner of that architecture: the
+# memory-sanitizer stage compiles a standard library from source, which
+# under emulation would take hours.
+
+on:
+  push:
+    paths:
+      - '.github/Dockerfile.ci'
+      - '.github/workflows/publish-ci-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.stage }} - ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        stage: [base, msan]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/Dockerfile.ci
+          target: ${{ matrix.stage }}
+          tags: ghcr.io/${{ github.repository }}/ci:${{ matrix.stage }}-${{ hashFiles('.github/Dockerfile.ci') }}-${{ runner.arch }}
+          push: true

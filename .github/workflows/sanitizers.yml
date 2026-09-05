@@ -14,6 +14,9 @@ jobs:
   sanitizers:
     name: ${{ matrix.config }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -30,19 +33,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build CI Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: .github/Dockerfile.ci
-          target: ${{ startsWith(matrix.config, 'msan') && 'msan' || 'base' }}
-          tags: zetasketch-cpp-ci
-          load: true
-          cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.os }}
-          cache-to: type=gha,mode=min,scope=${{ github.workflow }}-${{ matrix.os }}
+      - name: Obtain CI Docker image
+        env:
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}/ci
+          IMAGE_VERSION: ${{ hashFiles('.github/Dockerfile.ci') }}-${{ runner.arch }}
+          LOCAL_IMAGE: zetasketch-cpp-ci
+          STAGE: ${{ startsWith(matrix.config, 'msan') && 'msan' || 'base' }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/obtain-ci-image.sh
 
 
       - name: Cache Bazel state

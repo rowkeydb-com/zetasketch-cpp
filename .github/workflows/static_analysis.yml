@@ -17,25 +17,24 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 60
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build CI Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: .github/Dockerfile.ci
-          target: base
-          tags: zetasketch-cpp-ci
-          load: true
-          cache-from: type=gha,scope=${{ github.workflow }}-${{ matrix.os }}
-          cache-to: type=gha,mode=min,scope=${{ github.workflow }}-${{ matrix.os }}
+      - name: Obtain CI Docker image
+        env:
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}/ci
+          IMAGE_VERSION: ${{ hashFiles('.github/Dockerfile.ci') }}-${{ runner.arch }}
+          LOCAL_IMAGE: zetasketch-cpp-ci
+          STAGE: base
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .github/scripts/obtain-ci-image.sh
 
       - name: Cache Bazel state
         uses: actions/cache@v4
