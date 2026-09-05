@@ -33,30 +33,10 @@ constexpr int kTotalCount = 20;
 // buffer and leaves it empty.
 constexpr int kFlushedAddCount = 257;
 
-// The reference fixes an aggregator's value type when it is built and
-// refuses an integer added to one built for text. This library's
-// factory builds for text, as the reference's buildForStrings does, so
-// a sketch that admits integers is obtained by reading one that records
-// no value type, which is what the reference's forProto returns for a
-// state without the field. The integer factory arrives with the integer
-// hash, which is still a placeholder.
-std::expected<HyperLogLogPlusPlus, utils::Error> SketchAdmittingIntegers(
-    int32_t precision, int32_t sparse_precision) {
-  hll::State state;
-  state.encoding_version = 2;
-  state.precision = precision;
-  state.sparse_precision = sparse_precision;
-  state.value_type = hll::ValueType::kUnknown;
-  auto bytes = state.ToByteArray();
-  if (!bytes.has_value()) {
-    return std::unexpected(bytes.error());
-  }
-  return HyperLogLogPlusPlus::FromBytes(bytes.value());
-}
-
 TEST(HyperLogLogPlusPlusTest, RoundTripSerializationDense) {
-  auto sketch_res = SketchAdmittingIntegers(
-      kTestNormalPrecision, HyperLogLogPlusPlus::kSparsePrecisionDisabled);
+  auto sketch_res = HyperLogLogPlusPlus::Create(
+      kTestNormalPrecision, HyperLogLogPlusPlus::kSparsePrecisionDisabled,
+      hll::ValueType::kUnsignedInt64);
   ASSERT_TRUE(sketch_res.has_value());
   auto& sketch = sketch_res.value();
 
@@ -81,7 +61,8 @@ TEST(HyperLogLogPlusPlusTest, RoundTripSerializationDense) {
 
 TEST(HyperLogLogPlusPlusTest, RoundTripSerializationSparse) {
   auto sketch_res =
-      SketchAdmittingIntegers(kTestNormalPrecision, kTestSparsePrecision);
+      HyperLogLogPlusPlus::Create(kTestNormalPrecision, kTestSparsePrecision,
+                                  hll::ValueType::kUnsignedInt64);
   ASSERT_TRUE(sketch_res.has_value());
   auto& sketch = sketch_res.value();
 
@@ -122,8 +103,8 @@ TEST(HyperLogLogPlusPlusTest, ResultOnFreshSketchIsZero) {
 // Enough integer additions promote the sparse representation to the
 // normal one, and the estimate survives a serialization round trip.
 TEST(HyperLogLogPlusPlusTest, IntegerAddPromotesSparseToNormal) {
-  auto sketch_res =
-      SketchAdmittingIntegers(kLowNormalPrecision, kLowSparsePrecision);
+  auto sketch_res = HyperLogLogPlusPlus::Create(
+      kLowNormalPrecision, kLowSparsePrecision, hll::ValueType::kUnsignedInt64);
   ASSERT_TRUE(sketch_res.has_value());
   auto sketch = std::move(sketch_res.value());
   for (int64_t i = 0; i < kPromotionAddCount; ++i) {
@@ -227,8 +208,8 @@ TEST(HyperLogLogPlusPlusTest, AddAfterDenseDeserializationMatchesOnePass) {
 // Integer additions resumed after deserialization must also match
 // one-pass construction byte for byte.
 TEST(HyperLogLogPlusPlusTest, IntegerAddAfterDeserializationMatchesOnePass) {
-  auto first_res =
-      SketchAdmittingIntegers(kLowNormalPrecision, kLowSparsePrecision);
+  auto first_res = HyperLogLogPlusPlus::Create(
+      kLowNormalPrecision, kLowSparsePrecision, hll::ValueType::kUnsignedInt64);
   ASSERT_TRUE(first_res.has_value());
   auto first = std::move(first_res.value());
   for (int64_t i = 0; i < kFirstBatchCount; ++i) {
@@ -244,8 +225,8 @@ TEST(HyperLogLogPlusPlusTest, IntegerAddAfterDeserializationMatchesOnePass) {
     ASSERT_TRUE(resumed.Add(i).has_value());
   }
 
-  auto one_pass_res =
-      SketchAdmittingIntegers(kLowNormalPrecision, kLowSparsePrecision);
+  auto one_pass_res = HyperLogLogPlusPlus::Create(
+      kLowNormalPrecision, kLowSparsePrecision, hll::ValueType::kUnsignedInt64);
   ASSERT_TRUE(one_pass_res.has_value());
   auto one_pass = std::move(one_pass_res.value());
   for (int64_t i = 0; i < kTotalCount; ++i) {
@@ -277,8 +258,9 @@ TEST(HyperLogLogPlusPlusTest, FreshSketchSerializesToTheJavaEmptyVector) {
 // Integer additions resumed on a deserialized dense sketch must also
 // match one-pass construction byte for byte.
 TEST(HyperLogLogPlusPlusTest, IntegerAddAfterDenseDeserializationOnePass) {
-  auto first_res = SketchAdmittingIntegers(
-      kLowNormalPrecision, HyperLogLogPlusPlus::kSparsePrecisionDisabled);
+  auto first_res = HyperLogLogPlusPlus::Create(
+      kLowNormalPrecision, HyperLogLogPlusPlus::kSparsePrecisionDisabled,
+      hll::ValueType::kUnsignedInt64);
   ASSERT_TRUE(first_res.has_value());
   auto first = std::move(first_res.value());
   for (int64_t i = 0; i < kFirstBatchCount; ++i) {
@@ -294,8 +276,9 @@ TEST(HyperLogLogPlusPlusTest, IntegerAddAfterDenseDeserializationOnePass) {
     ASSERT_TRUE(resumed.Add(i).has_value());
   }
 
-  auto one_pass_res = SketchAdmittingIntegers(
-      kLowNormalPrecision, HyperLogLogPlusPlus::kSparsePrecisionDisabled);
+  auto one_pass_res = HyperLogLogPlusPlus::Create(
+      kLowNormalPrecision, HyperLogLogPlusPlus::kSparsePrecisionDisabled,
+      hll::ValueType::kUnsignedInt64);
   ASSERT_TRUE(one_pass_res.has_value());
   auto one_pass = std::move(one_pass_res.value());
   for (int64_t i = 0; i < kTotalCount; ++i) {
@@ -472,8 +455,7 @@ TEST(HyperLogLogPlusPlusTest, EstimatesAboveTheTabulatedPrecisions) {
   }
 }
 
-// The reference's own lowest-precision cases, ported to the string
-// path because the integer path is still a placeholder. A single
+// The reference's own lowest-precision cases, on the text path. A single
 // value at the minimum precision, with sparse mode disabled and with
 // it equal to the normal precision: the estimate is one, the bytes
 // are the reference's own, and a sketch parsed back from them

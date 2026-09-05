@@ -180,7 +180,7 @@ public class ZetaSketchCli {
       // than building a sketch, so batching the blocks that a
       // comparison needs turns hundreds of starts into one.
       Scanner scanner = new Scanner(System.in);
-      HyperLogLogPlusPlus<String> hll = null;
+      HyperLogLogPlusPlus<Object> hll = null;
       StringBuilder out = new StringBuilder();
       while (scanner.hasNextLine()) {
         String line = scanner.nextLine();
@@ -194,6 +194,9 @@ public class ZetaSketchCli {
           String[] parts = line.split(" ");
           int normalPrecision = Integer.parseInt(parts[1]);
           int sparsePrecision = Integer.parseInt(parts[2]);
+          // A block may name the aggregation type; without one it
+          // builds for text, which is what every earlier block did.
+          String type = parts.length > 3 ? parts[3] : "strings";
           HyperLogLogPlusPlus.Builder builder =
               new HyperLogLogPlusPlus.Builder().normalPrecision(normalPrecision);
           if (sparsePrecision == 0) {
@@ -201,12 +204,27 @@ public class ZetaSketchCli {
           } else {
             builder.sparsePrecision(sparsePrecision);
           }
-          hll = builder.buildForStrings();
+          HyperLogLogPlusPlus<?> built;
+          if ("longs".equals(type)) {
+            built = builder.buildForLongs();
+          } else if ("strings".equals(type)) {
+            built = builder.buildForStrings();
+          } else {
+            throw new IllegalStateException("unknown type " + type);
+          }
+          @SuppressWarnings("unchecked")
+          HyperLogLogPlusPlus<Object> typed = (HyperLogLogPlusPlus<Object>) built;
+          hll = typed;
         } else if (line.startsWith("ITEM ")) {
           if (hll == null) {
             throw new IllegalStateException("ITEM before SKETCH");
           }
           hll.add(new String(Base64.getDecoder().decode(line.substring(5)), UTF_8));
+        } else if (line.startsWith("LONG ")) {
+          if (hll == null) {
+            throw new IllegalStateException("LONG before SKETCH");
+          }
+          hll.add(Long.parseLong(line.substring(5)));
         } else {
           throw new IllegalStateException("unexpected line: " + line);
         }

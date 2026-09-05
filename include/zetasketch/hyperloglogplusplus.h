@@ -46,11 +46,20 @@ class HyperLogLogPlusPlus {
   static constexpr int32_t kDefaultSparsePrecisionDelta = 5;
   static constexpr int32_t kEncodingVersion = 2;
 
-  // Constructs a new sketch.
+  // Constructs a new sketch. The value type is fixed here, as the
+  // reference fixes it when it builds an aggregator, and it decides
+  // which additions the sketch will accept: a sketch built for text
+  // refuses an integer and one built for integers refuses text, in
+  // both libraries. The default builds for text; the reference has no
+  // default, each of its builders naming a type, so text is a choice
+  // made here. A sketch may also be built for 32-bit integers, which
+  // this library reads, merges and writes but has no addition for: the
+  // narrower addition arrives with the 32-bit mode itself.
   // We use std::expected for allocation-free error handling.
   [[nodiscard]] static std::expected<HyperLogLogPlusPlus, utils::Error> Create(
       int32_t normal_precision = kDefaultNormalPrecision,
-      int32_t sparse_precision = kSparsePrecisionDisabled);
+      int32_t sparse_precision = kSparsePrecisionDisabled,
+      hll::ValueType value_type = hll::ValueType::kBytesOrUtf8String);
 
   // Deserializes a sketch from a BigTable/byte array representation.
   [[nodiscard]] static std::expected<HyperLogLogPlusPlus, utils::Error>
@@ -80,10 +89,12 @@ class HyperLogLogPlusPlus {
   // serialization can succeed on truncated state.
   [[nodiscard]] std::expected<void, utils::Error> Add(std::string_view value);
 
-  // Adds an integer value to the sketch. The current hash is a
-  // placeholder that is not byte-compatible with the Java library's
-  // integer hashing; the reference hash replaces it when the integer
-  // path is implemented.
+  // Adds an integer value to the sketch. The value is hashed as the
+  // reference hashes one: written as eight bytes, the least significant
+  // first, and fingerprinted, so a sketch built from integers is byte
+  // for byte the sketch the reference builds from the same integers.
+  // Refused, without throwing, by a sketch whose value type admits
+  // something else.
   [[nodiscard]] std::expected<void, utils::Error> Add(int64_t value);
 
   // This function adds a precomputed raw hash to the sketch, which is utilized
@@ -132,6 +143,15 @@ class HyperLogLogPlusPlus {
   GetStateForSerialization();
 
   hll::Representation representation_;
+
+  // Whether an addition has already narrowed the kinds this sketch
+  // accepts. The reference keeps that set beside the sketch rather than
+  // in its bytes and narrows it to a single kind on the first addition,
+  // so a sketch recording the value type shared by text and byte arrays
+  // admits both until something is added and only text afterwards. Two
+  // sketches can therefore serialize identically, refuse different
+  // additions, and say so in different words.
+  bool additions_narrowed_ = false;
 };
 
 }  // namespace zetasketch

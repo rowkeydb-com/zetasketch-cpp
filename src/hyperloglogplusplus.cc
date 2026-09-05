@@ -4,6 +4,7 @@
 
 #include "zetasketch/hyperloglogplusplus.h"
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -40,18 +41,19 @@ constexpr AdditionType kStringAddition{
     .name = "STRING", .value_type = hll::ValueType::kBytesOrUtf8String};
 constexpr AdditionType kLongAddition{
     .name = "LONG", .value_type = hll::ValueType::kUnsignedInt64};
-// Names the set of additions a recorded value type admits, in the
-// reference's own notation. A sketch that has recorded none admits any
-// of them; one that has recorded the type used for text admits both
-// the string and the byte array that share it.
-const char* DescribeAdmittedTypes(hll::ValueType recorded) {
+// Names the additions a sketch admits, in the reference's notation. A
+// sketch that has recorded no value type admits any of them. One that
+// has recorded the type shared by text and byte arrays admits both
+// until something is added; the reference narrows the set to a single
+// kind on the first addition, and the name changes with it.
+const char* DescribeAdmittedTypes(hll::ValueType recorded, bool narrowed) {
   switch (recorded) {
     case hll::ValueType::kUnsignedInt32:
       return "[INTEGER]";
     case hll::ValueType::kUnsignedInt64:
       return "[LONG]";
     case hll::ValueType::kBytesOrUtf8String:
-      return "[STRING, BYTES]";
+      return narrowed ? "[STRING]" : "[STRING, BYTES]";
     case hll::ValueType::kUnknown:
       return "[LONG, INTEGER, STRING, BYTES]";
   }
@@ -63,16 +65,17 @@ const char* DescribeAdmittedTypes(hll::ValueType recorded) {
 // its first addition and writes it out thereafter, which is why a
 // sketch parsed without one does not stay without one.
 std::expected<void, utils::Error> RecordAddedType(
-    hll::State& state, const AdditionType& addition) {
+    hll::State& state, bool& narrowed, const AdditionType& addition) {
   if (state.value_type != hll::ValueType::kUnknown &&
       state.value_type != addition.value_type) {
     return std::unexpected(utils::Error{
         .code = utils::ErrorCode::kIllegalArgument,
-        .message = std::format("unable to add type {} to aggregator of type {}",
-                               addition.name,
-                               DescribeAdmittedTypes(state.value_type))});
+        .message = std::format(
+            "unable to add type {} to aggregator of type {}", addition.name,
+            DescribeAdmittedTypes(state.value_type, narrowed))});
   }
   state.value_type = addition.value_type;
+  narrowed = true;
   return {};
 }
 
@@ -110,11 +113,26 @@ std::string DescribeValueType(int32_t value_type) {
 }  // namespace
 
 std::expected<HyperLogLogPlusPlus, utils::Error> HyperLogLogPlusPlus::Create(
-    int32_t normal_precision, int32_t sparse_precision) {
+    int32_t normal_precision, int32_t sparse_precision,
+    hll::ValueType value_type) {
+  // The same value types the reference will read are the ones it will
+  // build for, so a sketch cannot be constructed carrying one it would
+  // refuse to parse back.
+  if (value_type != hll::ValueType::kUnknown &&
+      value_type != hll::ValueType::kUnsignedInt32 &&
+      value_type != hll::ValueType::kUnsignedInt64 &&
+      value_type != hll::ValueType::kBytesOrUtf8String) {
+    return std::unexpected(utils::Error{
+        .code = utils::ErrorCode::kIllegalArgument,
+        .message =
+            std::format("Unsupported value type {}",
+                        DescribeValueType(static_cast<int32_t>(value_type)))});
+  }
+
   hll::State state;
   state.type = HYPERLOGLOG_PLUS_UNIQUE;
   state.encoding_version = 2;
-  state.value_type = hll::ValueType::kBytesOrUtf8String;
+  state.value_type = value_type;
   state.precision = normal_precision;
   state.sparse_precision = sparse_precision;
 
@@ -139,25 +157,39 @@ hll::State& HyperLogLogPlusPlus::MutableState() {
 
 std::expected<void, utils::Error> HyperLogLogPlusPlus::Add(
     std::string_view value) {
-  auto admitted = RecordAddedType(MutableState(), kStringAddition);
+  auto admitted =
+      RecordAddedType(MutableState(), additions_narrowed_, kStringAddition);
   if (!admitted.has_value()) return admitted;
   const uint64_t hash = Fingerprint2011(value.data(), value.size());
   return AddHash(hash);
 }
 
 std::expected<void, utils::Error> HyperLogLogPlusPlus::Add(int64_t value) {
-  // Which additions a sketch admits, and the value type it records for
-  // one, are decided by the state alone and need no hash, so they are
-  // reproduced here. The reference distinguishes a 32-bit integer from
-  // a 64-bit one and records a different value type for each; this
-  // library offers only the wider addition, and the narrower one
-  // arrives with the integer hash below, which is still a placeholder.
-  auto admitted = RecordAddedType(MutableState(), kLongAddition);
+  auto admitted =
+      RecordAddedType(MutableState(), additions_narrowed_, kLongAddition);
   if (!admitted.has_value()) return admitted;
-  // Placeholder hash; the reference integer hash replaces it when the
-  // integer path is implemented against the Java library.
-  constexpr uint64_t kDummyHashMultiplier = 0x9E3779B97F4A7C15ULL;
-  return AddHash(static_cast<uint64_t>(value) * kDummyHashMultiplier);
+
+  // The reference hashes an integer by writing it as eight bytes, the
+  // least significant first, and fingerprinting those bytes with the
+  // same function it uses for text. Writing them in the other order,
+  // or in fewer than eight, would hash a different value and every
+  // sketch built from integers would differ from the reference's.
+  //
+  // One store puts them there on a host that is already little-endian,
+  // and the bytes are reversed first on one that is not. Written a byte
+  // at a time this was eight dependent stores that the eight-byte load
+  // in the hash then had to wait on, which cost more than the hash
+  // itself on a path that runs once per value added.
+  static_assert(std::endian::native == std::endian::little ||
+                    std::endian::native == std::endian::big,
+                "the integer encoding is defined for little- and big-endian "
+                "hosts only");
+  auto bits = static_cast<uint64_t>(value);
+  if constexpr (std::endian::native == std::endian::big) {
+    bits = std::byteswap(bits);
+  }
+  const auto encoded = std::bit_cast<std::array<char, sizeof(bits)>>(bits);
+  return AddHash(Fingerprint2011(encoded.data(), encoded.size()));
 }
 
 std::expected<void, utils::Error> HyperLogLogPlusPlus::AddHash(uint64_t hash) {

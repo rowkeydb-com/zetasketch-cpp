@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include <gtest/gtest.h>
+#include "zetasketch/hll/state.h"
 #include "zetasketch/hyperloglogplusplus.h"
 
 namespace zetasketch {
@@ -22,6 +23,17 @@ constexpr size_t kMergeB642Index = 3;
 constexpr size_t kMergeB64MergedIndex = 4;
 constexpr size_t kMergeExpectedCardinalityIndex = 5;
 constexpr size_t kMergeTokensCount = 6;
+
+// An integer row records the configuration, how many integers were
+// added, and the sketch the reference produced. The test rebuilds it
+// rather than only reading it, which is what puts the integer hash
+// under test in a build that never runs the reference.
+constexpr size_t kLongsPrecisionIndex = 2;
+constexpr size_t kLongsSparsePrecisionIndex = 3;
+constexpr size_t kLongsCountIndex = 4;
+constexpr size_t kLongsB64Index = 5;
+constexpr size_t kLongsCardinalityIndex = 6;
+constexpr size_t kLongsTokensCount = 7;
 
 std::string Base64Decode(const std::string& encoded_string) {
   // NOLINTBEGIN(readability-magic-numbers,
@@ -134,6 +146,38 @@ TEST(GoldenCorpusTest, VerifyParity) {
 
       EXPECT_EQ(reserialized_b64, b64)
           << "Bit-exact serialization parity failed for SKETCH " << name;
+    } else if (type == "LONGS") {
+      ASSERT_EQ(tokens.size(), kLongsTokensCount)
+          << "Malformed LONGS line at " << line_num;
+      const auto precision =
+          static_cast<int32_t>(std::stoi(tokens[kLongsPrecisionIndex]));
+      const auto sparse_precision =
+          static_cast<int32_t>(std::stoi(tokens[kLongsSparsePrecisionIndex]));
+      const int64_t count = std::stoll(tokens[kLongsCountIndex]);
+      const std::string& b64 = tokens[kLongsB64Index];
+
+      auto sketch_or = HyperLogLogPlusPlus::Create(
+          precision, sparse_precision, hll::ValueType::kUnsignedInt64);
+      ASSERT_TRUE(sketch_or.has_value()) << "Failed to construct " << name;
+      auto sketch = std::move(sketch_or.value());
+      for (int64_t value = 0; value < count; ++value) {
+        ASSERT_TRUE(sketch.Add(value).has_value())
+            << "Failed to add " << value << " for " << name;
+      }
+
+      auto serialized_or = sketch.Serialize();
+      ASSERT_TRUE(serialized_or.has_value())
+          << "Failed to serialize LONGS " << name;
+      const std::string serialized_str(serialized_or.value().begin(),
+                                       serialized_or.value().end());
+      EXPECT_EQ(Base64Encode(serialized_str), b64)
+          << "Bit-exact parity failed for LONGS " << name;
+
+      auto estimate = sketch.Result();
+      ASSERT_TRUE(estimate.has_value()) << "Estimate failed for " << name;
+      EXPECT_EQ(estimate.value(),
+                std::stoll(tokens[kLongsCardinalityIndex]))
+          << "Cardinality mismatch for " << name;
     } else if (type == "MERGE") {
       ASSERT_EQ(tokens.size(), kMergeTokensCount)
           << "Malformed MERGE line at " << line_num;

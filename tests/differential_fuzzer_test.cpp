@@ -11,6 +11,7 @@
 #include <cstring>
 #include <format>
 #include <iterator>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <sys/types.h>
@@ -249,9 +250,16 @@ std::string CppCreate(int np, int sp, const std::vector<std::string>& items) {
   return PrintHex(ser.value());
 }
 
+// The receiver is built for the value type its operands carry. The
+// reference builds its receiver by reading the first operand, so it
+// inherits that type, and a receiver of another type would write a
+// different value type into the merged sketch even where every
+// register agreed.
 std::string CppMerge(int np, int sp,
-                     const std::vector<std::string>& hex_sketches) {
-  auto hll_res = HyperLogLogPlusPlus::Create(np, sp);
+                     const std::vector<std::string>& hex_sketches,
+                     zetasketch::hll::ValueType value_type =
+                         zetasketch::hll::ValueType::kBytesOrUtf8String) {
+  auto hll_res = HyperLogLogPlusPlus::Create(np, sp, value_type);
   EXPECT_TRUE(hll_res.has_value());
   auto hll = std::move(hll_res.value());
 
@@ -1353,6 +1361,179 @@ TEST(ReferenceLibraryTest, ALongSequenceOfOperationsAgreesWithTheReference) {
   }
   EXPECT_EQ(mirrored, scripted);
 }
+
+// The integer path, compared with the reference at every precision
+// configuration the plan names. A sketch built from integers is the
+// same sketch either side only if the value is hashed identically, and
+// the reference hashes an integer by fingerprinting its eight bytes
+// with the least significant first, so a difference of byte order or
+// of width would show here as different bytes at every population but
+// the empty one.
+class IntegerDifferentialTest
+    : public ::testing::TestWithParam<std::pair<int, int>> {
+ protected:
+  // Builds a sketch of the given range of integers through this
+  // library, and the command block that asks the reference for the
+  // same sketch.
+  static std::string CppCreateLongs(int np, int sp, int64_t first,
+                                    int64_t last) {
+    auto sketch = zetasketch::HyperLogLogPlusPlus::Create(
+        np, sp, zetasketch::hll::ValueType::kUnsignedInt64);
+    EXPECT_TRUE(sketch.has_value());
+    if (!sketch.has_value()) return "";
+    for (int64_t value = first; value < last; ++value) {
+      EXPECT_TRUE(sketch.value().Add(value).has_value());
+    }
+    auto bytes = sketch.value().Serialize();
+    EXPECT_TRUE(bytes.has_value());
+    return bytes.has_value() ? PrintHex(bytes.value()) : "";
+  }
+
+  static std::string ReferenceBlock(int np, int sp, int64_t first,
+                                    int64_t last) {
+    std::string block = std::format("SKETCH {} {} longs\n", np, sp);
+    for (int64_t value = first; value < last; ++value) {
+      block += std::format("LONG {}\n", value);
+    }
+    return block;
+  }
+
+  // Values chosen to exercise the whole of the eight bytes an integer is
+  // hashed as, which a run of small counting numbers never does: both
+  // extremes of the type, either side of zero, the boundaries of the
+  // narrower widths, and pairs sharing all but one byte of their
+  // encoding.
+  static std::span<const int64_t> BoundaryValues() {
+    static constexpr std::array<int64_t, 20> kValues = {
+        std::numeric_limits<int64_t>::min(),
+        std::numeric_limits<int64_t>::min() + 1,
+        -4294967296,
+        -2147483648,
+        -65536,
+        -256,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        255,
+        256,
+        65535,
+        2147483647,
+        4294967296,
+        72057594037927936,
+        72057594037927937,
+        std::numeric_limits<int64_t>::max() - 1,
+        std::numeric_limits<int64_t>::max()};
+    return kValues;
+  }
+
+  static std::string BoundaryBlock(int np, int sp) {
+    std::string block = std::format("SKETCH {} {} longs\n", np, sp);
+    for (const int64_t value : BoundaryValues()) {
+      block += std::format("LONG {}\n", value);
+    }
+    return block;
+  }
+
+  static std::string CppCreateBoundary(int np, int sp) {
+    auto sketch = zetasketch::HyperLogLogPlusPlus::Create(
+        np, sp, zetasketch::hll::ValueType::kUnsignedInt64);
+    EXPECT_TRUE(sketch.has_value());
+    if (!sketch.has_value()) return "";
+    for (const int64_t value : BoundaryValues()) {
+      EXPECT_TRUE(sketch.value().Add(value).has_value());
+    }
+    auto bytes = sketch.value().Serialize();
+    EXPECT_TRUE(bytes.has_value());
+    return bytes.has_value() ? PrintHex(bytes.value()) : "";
+  }
+};
+
+TEST_P(IntegerDifferentialTest, Create) {
+  const int np = GetParam().first;
+  const int sp = GetParam().second;
+
+  const std::vector<int64_t> populations = {0, 1, 10, 100, 1000, 5000};
+
+  std::string batch;
+  for (const int64_t population : populations) {
+    batch += ReferenceBlock(np, sp, 0, population);
+  }
+  batch += BoundaryBlock(np, sp);
+
+  const std::vector<std::string> reference =
+      SplitLines(RunJava("CREATE_BATCH", np, sp, batch));
+  ASSERT_EQ(reference.size(), populations.size() + 1)
+      << "NP=" << np << " SP=" << sp;
+
+  for (size_t i = 0; i < populations.size(); ++i) {
+    EXPECT_EQ(CppCreateLongs(np, sp, 0, populations.at(i)), reference.at(i))
+        << "NP=" << np << " SP=" << sp << " integers=" << populations.at(i);
+  }
+  EXPECT_EQ(CppCreateBoundary(np, sp), reference.back())
+      << "NP=" << np << " SP=" << sp << " boundary values";
+}
+
+TEST_P(IntegerDifferentialTest, Merge) {
+  const int np = GetParam().first;
+  const int sp = GetParam().second;
+
+  // The shapes the string comparison uses: enough operands to stay
+  // sparse, enough to promote, and a mixture.
+  const std::vector<std::pair<int, int64_t>> merge_configs = {
+      {3, 100}, {3, 2000}, {10, 200}};
+
+  std::string create_batch;
+  std::vector<std::vector<std::string>> cpp_operands(merge_configs.size());
+  for (size_t config = 0; config < merge_configs.size(); ++config) {
+    const int operands = merge_configs.at(config).first;
+    const int64_t each = merge_configs.at(config).second;
+    for (int i = 0; i < operands; ++i) {
+      // Disjoint ranges, so that a merge has something to combine.
+      const int64_t first = static_cast<int64_t>(i) * each;
+      create_batch += ReferenceBlock(np, sp, first, first + each);
+      cpp_operands.at(config).push_back(
+          CppCreateLongs(np, sp, first, first + each));
+    }
+  }
+
+  const std::vector<std::string> reference_operands =
+      SplitLines(RunJava("CREATE_BATCH", np, sp, create_batch));
+  size_t expected = 0;
+  for (const auto& merge_config : merge_configs) {
+    expected += static_cast<size_t>(merge_config.first);
+  }
+  ASSERT_EQ(reference_operands.size(), expected) << "NP=" << np << " SP=" << sp;
+
+  std::string merge_batch;
+  size_t taken = 0;
+  for (const auto& merge_config : merge_configs) {
+    merge_batch += "MERGE\n";
+    for (int i = 0; i < merge_config.first; ++i) {
+      merge_batch += reference_operands.at(taken++) + "\n";
+    }
+  }
+  const std::vector<std::string> reference_merged =
+      SplitLines(RunJava("MERGE_BATCH", np, sp, merge_batch));
+  ASSERT_EQ(reference_merged.size(), merge_configs.size())
+      << "NP=" << np << " SP=" << sp;
+
+  for (size_t config = 0; config < merge_configs.size(); ++config) {
+    EXPECT_EQ(CppMerge(np, sp, cpp_operands.at(config),
+                       zetasketch::hll::ValueType::kUnsignedInt64),
+              reference_merged.at(config))
+        << "NP=" << np << " SP=" << sp
+        << " operands=" << merge_configs.at(config).first;
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    IntegerConfigs, IntegerDifferentialTest,
+    ::testing::Values(std::make_pair(15, 20), std::make_pair(10, 15),
+                      std::make_pair(15, 15), std::make_pair(10, 25),
+                      std::make_pair(24, 25), std::make_pair(15, 0),
+                      std::make_pair(10, 0)));
 
 class DifferentialFuzzerTest
     : public ::testing::TestWithParam<std::pair<int, int>> {

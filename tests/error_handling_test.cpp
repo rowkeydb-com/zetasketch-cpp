@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -1486,8 +1487,9 @@ TEST(ErrorHandlingTest, SerializingPromotesTheSketchAsTheReferenceDoes) {
 // this library offers. The product below is every value type the
 // reference accepts, including the field being absent, against both
 // additions. Only admission and the refusal's words are asserted for an
-// integer addition: the integer hash is still a placeholder, so the
-// bytes it produces are not the reference's and are not compared. Every
+// integer addition; the bytes an integer addition produces are
+// compared against the reference by the golden rows and by the integer
+// comparison in the differential suite. Every
 // verdict and message is the reference's own.
 TEST(ErrorHandlingTest, AdditionsAreAdmittedByTheRecordedValueType) {
   struct Admission {
@@ -1534,6 +1536,285 @@ TEST(ErrorHandlingTest, AdditionsAreAdmittedByTheRecordedValueType) {
       EXPECT_EQ(added_integer.error().message, admission.integer_message)
           << admission.description;
     }
+  }
+}
+
+// A sketch built for integers records the value type the reference
+// records for one, and writes it even when nothing has been added, so
+// the empty sketch alone distinguishes the two constructions. Every
+// pair below is the reference's own output for the two builders at the
+// same configuration.
+TEST(ErrorHandlingTest, ConstructionRecordsTheValueTypeAsTheReferenceDoes) {
+  struct Shape {
+    int32_t precision;
+    int32_t sparse_precision;
+    std::string_view for_integers;
+    std::string_view for_text;
+  };
+  const std::vector<Shape> shapes = {
+      {15, 20, "0870100018022008820706180f20143200",
+       "087010001802200b820706180f20143200"},
+      {10, 15, "0870100018022008820706180a200f3200",
+       "087010001802200b820706180a200f3200"},
+      {15, 0, "0870100018022008820702180f", "087010001802200b820702180f"},
+      {10, 0, "0870100018022008820702180a", "087010001802200b820702180a"},
+      {4, 9, "0870100018022008820706180420093200",
+       "087010001802200b820706180420093200"},
+      {24, 25, "0870100018022008820706181820193200",
+       "087010001802200b820706181820193200"},
+  };
+
+  for (const auto& shape : shapes) {
+    const std::string context = std::format(
+        "precision {} sparse {}", shape.precision, shape.sparse_precision);
+
+    auto integers =
+        HyperLogLogPlusPlus::Create(shape.precision, shape.sparse_precision,
+                                    zetasketch::hll::ValueType::kUnsignedInt64);
+    ASSERT_TRUE(integers.has_value()) << context;
+    auto integer_bytes = integers.value().Serialize();
+    ASSERT_TRUE(integer_bytes.has_value()) << context;
+    EXPECT_EQ(integer_bytes.value(), DecodeHex(shape.for_integers)) << context;
+
+    auto text =
+        HyperLogLogPlusPlus::Create(shape.precision, shape.sparse_precision);
+    ASSERT_TRUE(text.has_value()) << context;
+    auto text_bytes = text.value().Serialize();
+    ASSERT_TRUE(text_bytes.has_value()) << context;
+    EXPECT_EQ(text_bytes.value(), DecodeHex(shape.for_text)) << context;
+  }
+}
+
+// The set of additions a sketch admits narrows to one on its first
+// addition, and the refusal names the narrowed set. That narrowing
+// lives beside the sketch rather than in its bytes, so it cannot be
+// seen by comparing what a sketch writes; the message is the only place
+// it shows. Every message here is the reference's own.
+TEST(ErrorHandlingTest, TheAdmittedSetNarrowsOnTheFirstAddition) {
+  struct Case {
+    const char* description;
+    zetasketch::hll::ValueType constructed_with;
+    bool add_text_first;
+    std::string_view message;
+  };
+  const std::vector<Case> cases = {
+      {"text first, then an integer", zetasketch::hll::ValueType::kUnknown,
+       true, "unable to add type LONG to aggregator of type [STRING]"},
+      {"an integer first, then text", zetasketch::hll::ValueType::kUnknown,
+       false, "unable to add type STRING to aggregator of type [LONG]"},
+      {"built for text, text first, then an integer",
+       zetasketch::hll::ValueType::kBytesOrUtf8String, true,
+       "unable to add type LONG to aggregator of type [STRING]"},
+      {"built for integers, an integer first, then text",
+       zetasketch::hll::ValueType::kUnsignedInt64, false,
+       "unable to add type STRING to aggregator of type [LONG]"},
+  };
+
+  for (const auto& test_case : cases) {
+    auto sketch =
+        HyperLogLogPlusPlus::Create(10, 15, test_case.constructed_with);
+    ASSERT_TRUE(sketch.has_value()) << test_case.description;
+    if (test_case.add_text_first) {
+      ASSERT_TRUE(sketch.value().Add(std::string("a")).has_value())
+          << test_case.description;
+    } else {
+      ASSERT_TRUE(sketch.value().Add(int64_t{7}).has_value())
+          << test_case.description;
+    }
+
+    auto refused = test_case.add_text_first
+                       ? sketch.value().Add(int64_t{7})
+                       : sketch.value().Add(std::string("a"));
+    ASSERT_FALSE(refused.has_value()) << test_case.description;
+    EXPECT_EQ(refused.error().code,
+              zetasketch::utils::ErrorCode::kIllegalArgument)
+        << test_case.description;
+    EXPECT_EQ(refused.error().message, test_case.message)
+        << test_case.description;
+  }
+}
+
+// Which additions a constructed sketch admits before anything has been
+// added, over every value type it can be constructed with against both
+// additions this library offers.
+// The reference fixes the type when it builds and refuses an addition
+// of another type; a sketch constructed without a type takes the type
+// of its first addition, as a parsed one does. Nothing here throws: a
+// refused addition is an error value, because this library is linked
+// into a server that must not fault on what a caller passes it.
+TEST(ErrorHandlingTest, ConstructedSketchesAdmitAdditionsByValueType) {
+  struct Cell {
+    const char* description;
+    zetasketch::hll::ValueType constructed_with;
+    bool admits_text;
+    std::string_view text_message;
+    bool admits_integers;
+    std::string_view integer_message;
+  };
+  const std::vector<Cell> cells = {
+      {"constructed without a value type", zetasketch::hll::ValueType::kUnknown,
+       true, "", true, ""},
+      {"constructed for text", zetasketch::hll::ValueType::kBytesOrUtf8String,
+       true, "", false,
+       "unable to add type LONG to aggregator of type [STRING, BYTES]"},
+      {"constructed for 64-bit integers",
+       zetasketch::hll::ValueType::kUnsignedInt64, false,
+       "unable to add type STRING to aggregator of type [LONG]", true, ""},
+      {"constructed for 32-bit integers",
+       zetasketch::hll::ValueType::kUnsignedInt32, false,
+       "unable to add type STRING to aggregator of type [INTEGER]", false,
+       "unable to add type LONG to aggregator of type [INTEGER]"},
+  };
+
+  for (const auto& cell : cells) {
+    auto text = HyperLogLogPlusPlus::Create(10, 15, cell.constructed_with);
+    ASSERT_TRUE(text.has_value()) << cell.description;
+    auto added_text = text.value().Add(std::string("a"));
+    ASSERT_EQ(added_text.has_value(), cell.admits_text) << cell.description;
+    if (!cell.admits_text) {
+      EXPECT_EQ(added_text.error().code,
+                zetasketch::utils::ErrorCode::kIllegalArgument)
+          << cell.description;
+      EXPECT_EQ(added_text.error().message, cell.text_message)
+          << cell.description;
+    }
+
+    auto integers = HyperLogLogPlusPlus::Create(10, 15, cell.constructed_with);
+    ASSERT_TRUE(integers.has_value()) << cell.description;
+    auto added_integer = integers.value().Add(int64_t{7});
+    ASSERT_EQ(added_integer.has_value(), cell.admits_integers)
+        << cell.description;
+    if (!cell.admits_integers) {
+      EXPECT_EQ(added_integer.error().code,
+                zetasketch::utils::ErrorCode::kIllegalArgument)
+          << cell.description;
+      EXPECT_EQ(added_integer.error().message, cell.integer_message)
+          << cell.description;
+    }
+  }
+}
+
+// A value type the reference will not read cannot be constructed
+// either, in the reference's own words, so a sketch cannot be built
+// that it would refuse to parse back.
+TEST(ErrorHandlingTest, ConstructionRefusesValueTypesTheReferenceRefuses) {
+  struct Refusal {
+    int32_t value_type;
+    std::string_view message;
+  };
+  const std::vector<Refusal> refusals = {
+      {1, "Unsupported value type DefaultOpsType.Id.INT8"},
+      {2, "Unsupported value type DefaultOpsType.Id.INT16"},
+      {3, "Unsupported value type DefaultOpsType.Id.INT32"},
+      {4, "Unsupported value type DefaultOpsType.Id.INT64"},
+      {5, "Unsupported value type DefaultOpsType.Id.UINT8"},
+      {6, "Unsupported value type DefaultOpsType.Id.UINT16"},
+      {9, "Unsupported value type DefaultOpsType.Id.FLOAT"},
+      {10, "Unsupported value type DefaultOpsType.Id.DOUBLE"},
+      {12, "Unsupported value type <unnamed custom value type 12>"},
+      {1000, "Unsupported value type <unnamed custom value type 1000>"},
+  };
+
+  for (const auto& refusal : refusals) {
+    auto sketch = HyperLogLogPlusPlus::Create(
+        10, 15, static_cast<zetasketch::hll::ValueType>(refusal.value_type));
+    ASSERT_FALSE(sketch.has_value()) << refusal.value_type;
+    EXPECT_EQ(sketch.error().code,
+              zetasketch::utils::ErrorCode::kIllegalArgument)
+        << refusal.value_type;
+    EXPECT_EQ(sketch.error().message, refusal.message) << refusal.value_type;
+  }
+}
+
+// An integer addition survives a write and a read: the sketch it
+// produces parses back, keeps its recorded type, and accepts further
+// integers, which is the sequence a caller performs across a
+// serialization boundary.
+TEST(ErrorHandlingTest, IntegerAdditionsSurviveAWriteAndARead) {
+  auto sketch = HyperLogLogPlusPlus::Create(
+      10, 15, zetasketch::hll::ValueType::kUnsignedInt64);
+  ASSERT_TRUE(sketch.has_value());
+  for (int64_t value = 0; value < 40; ++value) {
+    ASSERT_TRUE(sketch.value().Add(value).has_value()) << value;
+  }
+  auto written = sketch.value().Serialize();
+  ASSERT_TRUE(written.has_value());
+
+  auto reread = HyperLogLogPlusPlus::FromBytes(written.value());
+  ASSERT_TRUE(reread.has_value());
+  EXPECT_FALSE(reread.value().Add(std::string("a")).has_value());
+  for (int64_t value = 40; value < 80; ++value) {
+    ASSERT_TRUE(reread.value().Add(value).has_value()) << value;
+  }
+
+  auto one_pass = HyperLogLogPlusPlus::Create(
+      10, 15, zetasketch::hll::ValueType::kUnsignedInt64);
+  ASSERT_TRUE(one_pass.has_value());
+  for (int64_t value = 0; value < 80; ++value) {
+    ASSERT_TRUE(one_pass.value().Add(value).has_value()) << value;
+  }
+  auto resumed_bytes = reread.value().Serialize();
+  auto one_pass_bytes = one_pass.value().Serialize();
+  ASSERT_TRUE(resumed_bytes.has_value());
+  ASSERT_TRUE(one_pass_bytes.has_value());
+  EXPECT_EQ(resumed_bytes.value(), one_pass_bytes.value());
+}
+
+// A sketch that records no value type takes the type of its first
+// addition, and an integer addition records the type the reference
+// records for integers. This is the path the reference's own reader
+// produces: a sketch read from bytes that carry no value type, given
+// integers, must reach the sketch the reference's integer builder
+// reaches from the same integers. Every expectation is the reference's
+// own output.
+TEST(ErrorHandlingTest, IntegerAdditionsRecordTheValueTypeOnAnUntypedSketch) {
+  struct Case {
+    int32_t precision;
+    int32_t sparse_precision;
+    int additions;
+    std::string_view written;
+  };
+  const std::vector<Case> cases = {
+      {10, 15, 1, "087010011802200882070b1001180a200f32039d8501"},
+      {10, 15, 10,
+       "0870100a1802200882071c100a180a200f32149915c60af8039a60ac01a71bec14dc03"
+       "a623a903"},
+      {4, 0, 1,
+       "087010011802200882071418042a1000000000000000000200000000000000"},
+  };
+
+  for (const auto& test_case : cases) {
+    const std::string context =
+        std::format("precision {} sparse {} additions {}", test_case.precision,
+                    test_case.sparse_precision, test_case.additions);
+
+    // Built with no value type, as a sketch read from bytes without one
+    // is, and given integers.
+    auto untyped = HyperLogLogPlusPlus::Create(
+        test_case.precision, test_case.sparse_precision,
+        zetasketch::hll::ValueType::kUnknown);
+    ASSERT_TRUE(untyped.has_value()) << context;
+    for (int64_t value = 0; value < test_case.additions; ++value) {
+      ASSERT_TRUE(untyped.value().Add(value).has_value()) << context;
+    }
+    auto from_untyped = untyped.value().Serialize();
+    ASSERT_TRUE(from_untyped.has_value()) << context;
+
+    // Built for integers from the start, which must reach the same
+    // sketch once the first addition has recorded the type.
+    auto typed = HyperLogLogPlusPlus::Create(
+        test_case.precision, test_case.sparse_precision,
+        zetasketch::hll::ValueType::kUnsignedInt64);
+    ASSERT_TRUE(typed.has_value()) << context;
+    for (int64_t value = 0; value < test_case.additions; ++value) {
+      ASSERT_TRUE(typed.value().Add(value).has_value()) << context;
+    }
+    auto from_typed = typed.value().Serialize();
+    ASSERT_TRUE(from_typed.has_value()) << context;
+
+    // Both must be the reference's own sketch, not merely each other's.
+    EXPECT_EQ(from_untyped.value(), DecodeHex(test_case.written)) << context;
+    EXPECT_EQ(from_typed.value(), DecodeHex(test_case.written)) << context;
   }
 }
 
