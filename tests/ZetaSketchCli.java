@@ -2,6 +2,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.zetasketch.HyperLogLogPlusPlus;
 import com.google.zetasketch.internal.hllplus.Data;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Scanner;
 
@@ -35,6 +36,100 @@ public class ZetaSketchCli {
       bytes[i] = (byte) ((high << 4) | low);
     }
     return bytes;
+  }
+
+  // A fault in a script, as distinct from a refusal by the reference.
+  // The two are reported under different markers so that a broken
+  // script cannot read as a pinned refusal.
+  private static final class ScriptFault extends RuntimeException {
+    ScriptFault(String message) {
+      super(message);
+    }
+  }
+
+  // Names an aggregator the way a script does: by type and precisions
+  // through the reference's builder, or by the bytes it is parsed from
+  // after the type "proto". A sparse precision written as "default"
+  // leaves the builder's own default in place, which is what a caller
+  // who names only the normal precision gets. Reading the words is the
+  // script's business and is refused as a script fault; building is
+  // the reference's, and its refusals propagate as they are.
+  private static final class AggregatorSpec {
+    private final String type;
+    private final int normalPrecision;
+    private final Integer sparsePrecision;
+    private final byte[] proto;
+
+    private AggregatorSpec(
+        String type, int normalPrecision, Integer sparsePrecision, byte[] proto) {
+      this.type = type;
+      this.normalPrecision = normalPrecision;
+      this.sparsePrecision = sparsePrecision;
+      this.proto = proto;
+    }
+
+    static AggregatorSpec parse(String[] words) {
+      try {
+        if (words.length == 2 && "proto".equals(words[0])) {
+          return new AggregatorSpec("proto", 0, null, parseHex(words[1]));
+        }
+        if (words.length != 3) {
+          throw new ScriptFault(
+              "expected <type> <normal precision> <sparse precision|default>"
+                  + " or proto <hex>, got " + words.length + " words");
+        }
+        String type = words[0];
+        if (!"strings".equals(type)
+            && !"bytes".equals(type)
+            && !"longs".equals(type)
+            && !"integers".equals(type)) {
+          // A type that is not recognised must not fall back to any
+          // builder. A strings aggregator accepts both text and byte
+          // values, so a mistyped script would otherwise run to
+          // completion and print checkpoints that look plausible
+          // while measuring an aggregator nobody asked for.
+          throw new ScriptFault("unknown type " + type);
+        }
+        int normalPrecision = Integer.parseInt(words[1]);
+        Integer sparsePrecision =
+            "default".equals(words[2]) ? null : Integer.valueOf(words[2]);
+        return new AggregatorSpec(type, normalPrecision, sparsePrecision, null);
+      } catch (IllegalArgumentException e) {
+        throw new ScriptFault(e.getMessage());
+      }
+    }
+
+    // The builders for text and for byte arrays are the same builder in
+    // the reference: both record the value type shared by strings and
+    // byte arrays, and the generic parameter that distinguishes them is
+    // erased here. A comparison between the two would compare an
+    // aggregator with itself.
+    @SuppressWarnings("unchecked")
+    HyperLogLogPlusPlus<Object> build() {
+      if (proto != null) {
+        return (HyperLogLogPlusPlus<Object>) HyperLogLogPlusPlus.forProto(proto);
+      }
+      HyperLogLogPlusPlus.Builder builder =
+          new HyperLogLogPlusPlus.Builder().normalPrecision(normalPrecision);
+      if (sparsePrecision != null) {
+        if (sparsePrecision == 0) {
+          builder.noSparseMode();
+        } else {
+          builder.sparsePrecision(sparsePrecision);
+        }
+      }
+      HyperLogLogPlusPlus<?> built;
+      if ("strings".equals(type)) {
+        built = builder.buildForStrings();
+      } else if ("bytes".equals(type)) {
+        built = builder.buildForBytes();
+      } else if ("longs".equals(type)) {
+        built = builder.buildForLongs();
+      } else {
+        built = builder.buildForIntegers();
+      }
+      return (HyperLogLogPlusPlus<Object>) built;
+    }
   }
 
   public static void main(String[] args) throws Exception {
@@ -275,42 +370,32 @@ public class ZetaSketchCli {
       // Applies a sequence of commands to one sketch, so that a
       // comparison can reach the states an operation leaves behind for
       // the next one rather than only the state a parse produces. The
-      // builder is chosen by the type argument, as the reference fixes
-      // an aggregator's value type when it is built.
-      String type = args[1];
-      int normalPrecision = Integer.parseInt(args[2]);
-      int sparsePrecision = Integer.parseInt(args[3]);
-
-      HyperLogLogPlusPlus.Builder builder =
-          new HyperLogLogPlusPlus.Builder().normalPrecision(normalPrecision);
-      if (sparsePrecision == 0) {
-        builder.noSparseMode();
-      } else {
-        builder.sparsePrecision(sparsePrecision);
+      // receiver is named by the arguments after the mode, as an
+      // aggregator is named anywhere in a script: by type and
+      // precisions, since the reference fixes an aggregator's value
+      // type when it is built, or by the bytes it is parsed from.
+      // The receiver may also be left unnamed, with the word "none", and
+      // named later by a RECEIVER command; until then every command
+      // that needs one is a script fault.
+      HyperLogLogPlusPlus<Object> hll = null;
+      if (!(args.length == 2 && "none".equals(args[1]))) {
+        try {
+          hll = AggregatorSpec.parse(Arrays.copyOfRange(args, 1, args.length)).build();
+        } catch (ScriptFault e) {
+          System.out.println("BADINPUT " + e.getMessage());
+          return;
+        } catch (RuntimeException e) {
+          System.out.println("ERROR " + e.getMessage());
+          return;
+        }
       }
-      // The builders for text and for byte arrays are the same builder
-      // in the reference: both record the value type shared by strings
-      // and byte arrays, and the generic parameter that distinguishes
-      // them is erased here. A comparison between the two would compare
-      // an aggregator with itself.
-      HyperLogLogPlusPlus<?> built;
-      if ("strings".equals(type)) {
-        built = builder.buildForStrings();
-      } else if ("bytes".equals(type)) {
-        built = builder.buildForBytes();
-      } else if ("longs".equals(type)) {
-        built = builder.buildForLongs();
-      } else {
-        // A type that is not recognised must not fall back to any
-        // builder. A strings aggregator accepts both text and byte
-        // values, so a mistyped script would otherwise run to
-        // completion and print checkpoints that look plausible while
-        // measuring an aggregator nobody asked for.
-        System.out.println("BADINPUT unknown type " + type);
-        return;
-      }
-      @SuppressWarnings("unchecked")
-      HyperLogLogPlusPlus<Object> hll = (HyperLogLogPlusPlus<Object>) built;
+      // A second aggregator a script may build, add to, and merge into
+      // the receiver while both are live. Merging bytes parses a fresh
+      // aggregator, whose admitted set is whatever its value type
+      // says; only a live operand can have had that set narrowed by an
+      // addition, and the reference's merge intersects the two sets as
+      // they stand.
+      HyperLogLogPlusPlus<Object> operand = null;
 
       Scanner scanner = new Scanner(System.in);
       while (scanner.hasNextLine()) {
@@ -341,25 +426,57 @@ public class ZetaSketchCli {
         // pinned refusal.
         byte[] payload = null;
         long longArgument = 0;
+        int intArgument = 0;
+        AggregatorSpec operandSpec = null;
         try {
           boolean takesArgument =
               "ADD_STRING".equals(command)
                   || "ADD_BYTES".equals(command)
                   || "ADD_LONG".equals(command)
-                  || "MERGE".equals(command);
+                  || "ADD_INT".equals(command)
+                  || "MERGE".equals(command)
+                  || "OPERAND".equals(command)
+                  || "RECEIVER".equals(command)
+                  || "MARK".equals(command)
+                  || "OPERAND_ADD_STRING".equals(command)
+                  || "OPERAND_ADD_BYTES".equals(command)
+                  || "OPERAND_ADD_LONG".equals(command)
+                  || "OPERAND_ADD_INT".equals(command);
           if (takesArgument && !hasArgument) {
             throw new IllegalArgumentException("missing argument for " + command);
           }
-          if ("ADD_STRING".equals(command) || "ADD_BYTES".equals(command)) {
+          if ("ADD_STRING".equals(command)
+              || "ADD_BYTES".equals(command)
+              || "OPERAND_ADD_STRING".equals(command)
+              || "OPERAND_ADD_BYTES".equals(command)) {
             payload = Base64.getDecoder().decode(argument);
-          } else if ("ADD_LONG".equals(command)) {
+          } else if ("ADD_LONG".equals(command) || "OPERAND_ADD_LONG".equals(command)) {
             longArgument = Long.parseLong(argument);
+          } else if ("ADD_INT".equals(command) || "OPERAND_ADD_INT".equals(command)) {
+            intArgument = Integer.parseInt(argument);
           } else if ("MERGE".equals(command)) {
             // An operand of no bytes cannot reach here: an argument
             // that is absent is refused above, and hexadecimal that is
             // present decodes to at least one byte or is refused as
             // being of odd length.
             payload = parseHex(argument);
+          } else if ("OPERAND".equals(command) || "RECEIVER".equals(command)) {
+            operandSpec = AggregatorSpec.parse(argument.split(" "));
+          }
+          boolean needsReceiver =
+              !"RECEIVER".equals(command) && !"MARK".equals(command);
+          if (needsReceiver && hll == null) {
+            throw new IllegalArgumentException(command + " with no receiver");
+          }
+          boolean needsOperand =
+              "OPERAND_ADD_STRING".equals(command)
+                  || "OPERAND_ADD_BYTES".equals(command)
+                  || "OPERAND_ADD_LONG".equals(command)
+                  || "OPERAND_ADD_INT".equals(command)
+                  || "OPERAND_CHECKPOINT".equals(command)
+                  || "MERGE_OPERAND".equals(command);
+          if (needsOperand && operand == null) {
+            throw new IllegalArgumentException(command + " before any OPERAND");
           }
         } catch (RuntimeException e) {
           System.out.println("BADINPUT " + e.getMessage());
@@ -379,16 +496,39 @@ public class ZetaSketchCli {
             hll.add(payload);
           } else if ("ADD_LONG".equals(command)) {
             hll.add(longArgument);
+          } else if ("ADD_INT".equals(command)) {
+            hll.add(intArgument);
           } else if ("MERGE".equals(command)) {
             hll.merge(payload);
           } else if ("CHECKPOINT".equals(command)) {
-            StringBuilder sb = new StringBuilder();
-            for (byte b : hll.serializeToByteArray()) {
-              sb.append(String.format("%02x", b));
-            }
-            System.out.println(sb);
+            System.out.println(hex(hll.serializeToByteArray()));
           } else if ("RESULT".equals(command)) {
             System.out.println(hll.result());
+          } else if ("OPERAND".equals(command)) {
+            operand = operandSpec.build();
+          } else if ("OPERAND_ADD_STRING".equals(command)) {
+            operand.add(new String(payload, UTF_8));
+          } else if ("OPERAND_ADD_BYTES".equals(command)) {
+            operand.add(payload);
+          } else if ("OPERAND_ADD_LONG".equals(command)) {
+            operand.add(longArgument);
+          } else if ("OPERAND_ADD_INT".equals(command)) {
+            operand.add(intArgument);
+          } else if ("OPERAND_CHECKPOINT".equals(command)) {
+            System.out.println(hex(operand.serializeToByteArray()));
+          } else if ("MERGE_OPERAND".equals(command)) {
+            hll.merge(operand);
+          } else if ("RECEIVER".equals(command)) {
+            // Replaces the receiver, so that one run of the harness can
+            // carry a sequence of independent scripts. A receiver the
+            // reference refuses to build leaves none in place, and the
+            // commands that follow report that until the next one.
+            hll = null;
+            hll = operandSpec.build();
+          } else if ("MARK".equals(command)) {
+            // Echoed as given, so that a reader of the output can find
+            // where one script ends and the next begins.
+            System.out.println("MARK " + argument);
           } else {
             System.out.println("BADINPUT unknown command " + command);
           }
