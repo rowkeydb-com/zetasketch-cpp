@@ -97,10 +97,33 @@ following C++ API methods against the Java equivalents:
     normal precision, equal to it, above it, at the maximum and past
     it, with the accepted set and the refusal messages confirmed
     against the reference.
+*   `HyperLogLogPlusPlus::Create(normal_precision, value_type)`, which
+    takes the sparse precision the reference's builder chooses, five
+    above the normal precision and capped at the maximum: compared with
+    the reference's default-built aggregator at every normal precision
+    from one below the minimum to one above the maximum, for each of
+    the three value types it builds for, empty and after additions.
 *   `HyperLogLogPlusPlus::Add(std::string_view)`
 *   `HyperLogLogPlusPlus::Add(int64_t)`
 *   `HyperLogLogPlusPlus::FromBytes(std::span<const uint8_t>)`
-*   `HyperLogLogPlusPlus::Merge(HyperLogLogPlusPlus&&)`
+*   `HyperLogLogPlusPlus::Validate()`, the full walk of a sketch's
+    contents that reading stops short of. Every sketch the reference
+    writes in the golden corpus and in the differential runs passes it;
+    each defect it refuses (a register above the largest a hash can
+    produce; a sparse stream that does not decode, does not increase,
+    repeats an index, names an index outside either precision, or
+    disagrees with the recorded sparse size) is constructed and refused
+    in `error_handling_test.cpp`.
+*   `HyperLogLogPlusPlus::Merge(HyperLogLogPlusPlus&&)`, including the
+    kinds of value the two sketches admit. The reference intersects the
+    two admitted sets and refuses an empty intersection; every pair of
+    the eleven admitted-set states this library can reach (untyped,
+    each of the three value types built and read from bytes, and each
+    narrowed by a first addition) is merged both ways, then given each
+    kind of addition in both orders, and the verdicts, messages, bytes
+    and estimates compared with the reference's, at five pairings of
+    configuration that put each side in each representation, at
+    differing precisions, and past the promotion threshold.
 *   `HyperLogLogPlusPlus::Serialize()`
 *   `HyperLogLogPlusPlus::Result()` (Cardinality estimation parity verified in
     `golden_corpus_test.cpp`).

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <expected>
 #include <format>
 #include <iterator>
 #include <limits>
@@ -34,6 +35,7 @@
 #include "zetasketch/hll/math_utils.h"
 #include "zetasketch/hll/state.h"
 #include "zetasketch/hyperloglogplusplus.h"
+#include "zetasketch/utils/error.h"
 
 namespace {
 
@@ -405,6 +407,48 @@ std::vector<std::string> RunScript(const std::string& type, int np, int sp,
     output.pop_back();
   }
   return SplitLinesKeepingEmpty(output);
+}
+
+// Runs a script that names its own receivers with RECEIVER commands and
+// separates its parts with MARK commands, so that one start of the
+// reference can carry many independent scripts.
+std::vector<std::string> RunScriptWithReceivers(const std::string& script) {
+  std::string output = RunJavaWithArguments({"SCRIPT", "none"}, script);
+  if (!output.empty() && output.back() == '\n') {
+    output.pop_back();
+  }
+  return SplitLinesKeepingEmpty(output);
+}
+
+// Splits the harness's output at its MARK lines into named blocks, in
+// the order the marks were printed.
+std::vector<std::pair<std::string, std::vector<std::string>>> SplitAtMarks(
+    const std::vector<std::string>& lines) {
+  constexpr std::string_view kMark = "MARK ";
+  std::vector<std::pair<std::string, std::vector<std::string>>> blocks;
+  for (const std::string& line : lines) {
+    if (line.starts_with(kMark)) {
+      blocks.emplace_back(line.substr(kMark.size()),
+                          std::vector<std::string>{});
+      continue;
+    }
+    if (blocks.empty()) {
+      ADD_FAILURE() << "output before the first mark: " << line;
+      continue;
+    }
+    blocks.back().second.push_back(line);
+  }
+  return blocks;
+}
+
+// Every byte string the reference writes must be read back and pass the
+// full walk of its contents.
+void ExpectValidates(const std::string& hex, const std::string& context) {
+  auto sketch = HyperLogLogPlusPlus::FromBytes(ParseHexString(hex));
+  ASSERT_TRUE(sketch.has_value()) << context;
+  auto valid = sketch->Validate();
+  EXPECT_TRUE(valid.has_value())
+      << context << (valid.has_value() ? "" : ": " + valid.error().message);
 }
 
 // Which estimator is used is decided by the linear counting estimate
@@ -1470,9 +1514,13 @@ TEST_P(IntegerDifferentialTest, Create) {
   for (size_t i = 0; i < populations.size(); ++i) {
     EXPECT_EQ(CppCreateLongs(np, sp, 0, populations.at(i)), reference.at(i))
         << "NP=" << np << " SP=" << sp << " integers=" << populations.at(i);
+    ExpectValidates(reference.at(i), std::format("NP={} SP={} integers={}", np,
+                                                 sp, populations.at(i)));
   }
   EXPECT_EQ(CppCreateBoundary(np, sp), reference.back())
       << "NP=" << np << " SP=" << sp << " boundary values";
+  ExpectValidates(reference.back(),
+                  std::format("NP={} SP={} boundary values", np, sp));
 }
 
 TEST_P(IntegerDifferentialTest, Merge) {
@@ -1574,6 +1622,8 @@ TEST_P(DifferentialFuzzerTest, Create) {
     EXPECT_EQ(CppCreate(np, sp, populations.at(i)), reference.at(i))
         << "Mismatch at NP=" << np << " SP=" << sp
         << " Elements=" << counts.at(i);
+    ExpectValidates(reference.at(i), std::format("NP={} SP={} Elements={}", np,
+                                                 sp, counts.at(i)));
   }
 }
 
@@ -1648,6 +1698,387 @@ INSTANTIATE_TEST_SUITE_P(
         std::make_pair(4, 4), std::make_pair(5, 0), std::make_pair(5, 10),
         std::make_pair(7, 12), std::make_pair(8, 0), std::make_pair(6, 0),
         std::make_pair(7, 0), std::make_pair(8, 13), std::make_pair(9, 0)));
+
+// The additions, if any, that narrow a sketch's admitted set before it
+// is used. The reference also narrows on a byte-array addition and on
+// a 32-bit integer addition, which this library has no way to make.
+enum class Prelude { kNone, kString, kLong };
+
+// One side of a merge: its precisions, and how many values a prelude
+// adds to it, which decides whether it is still sparse when merged.
+struct Side {
+  int np;
+  int sp;
+  int values;
+};
+
+// A state a sketch's admitted set can be in, paired with the harness
+// words that put the reference in the same state. The set is derived
+// from the recorded value type when a sketch is built or read, so a
+// typed sketch reaches the same state from Create and from FromBytes,
+// and both routes are here.
+struct AdmittedState {
+  std::string name;
+  std::string reference_spec;
+  Prelude prelude;
+  std::string hex;  // Read with FromBytes when set; built otherwise.
+  zetasketch::hll::ValueType value_type;
+  Side side;
+};
+
+// The bytes of an empty sketch at the given precisions and value type.
+// They are this library's, which the parse-shape and aggregator-field
+// comparisons establish are the reference's own.
+std::string EmptySketchHex(const Side& side,
+                           zetasketch::hll::ValueType value_type) {
+  auto sketch = HyperLogLogPlusPlus::Create(side.np, side.sp, value_type);
+  EXPECT_TRUE(sketch.has_value());
+  if (!sketch.has_value()) return "";
+  auto bytes = sketch->Serialize();
+  EXPECT_TRUE(bytes.has_value());
+  return bytes.has_value() ? PrintHex(*bytes) : "";
+}
+
+std::vector<AdmittedState> AdmittedStates(const Side& side) {
+  using zetasketch::hll::ValueType;
+  const auto built = [&side](std::string_view word) {
+    return std::format("{} {} {}", word, side.np, side.sp);
+  };
+  const std::string untyped = EmptySketchHex(side, ValueType::kUnknown);
+  const std::string text = EmptySketchHex(side, ValueType::kBytesOrUtf8String);
+  const std::string longs = EmptySketchHex(side, ValueType::kUnsignedInt64);
+  const std::string integers = EmptySketchHex(side, ValueType::kUnsignedInt32);
+  return {
+      {.name = "untyped",
+       .reference_spec = "proto " + untyped,
+       .prelude = Prelude::kNone,
+       .hex = untyped,
+       .value_type = ValueType::kUnknown,
+       .side = side},
+      {.name = "text",
+       .reference_spec = built("strings"),
+       .prelude = Prelude::kNone,
+       .hex = "",
+       .value_type = ValueType::kBytesOrUtf8String,
+       .side = side},
+      {.name = "longs",
+       .reference_spec = built("longs"),
+       .prelude = Prelude::kNone,
+       .hex = "",
+       .value_type = ValueType::kUnsignedInt64,
+       .side = side},
+      {.name = "integers",
+       .reference_spec = built("integers"),
+       .prelude = Prelude::kNone,
+       .hex = "",
+       .value_type = ValueType::kUnsignedInt32,
+       .side = side},
+      {.name = "text-from-bytes",
+       .reference_spec = "proto " + text,
+       .prelude = Prelude::kNone,
+       .hex = text,
+       .value_type = ValueType::kBytesOrUtf8String,
+       .side = side},
+      {.name = "longs-from-bytes",
+       .reference_spec = "proto " + longs,
+       .prelude = Prelude::kNone,
+       .hex = longs,
+       .value_type = ValueType::kUnsignedInt64,
+       .side = side},
+      {.name = "integers-from-bytes",
+       .reference_spec = "proto " + integers,
+       .prelude = Prelude::kNone,
+       .hex = integers,
+       .value_type = ValueType::kUnsignedInt32,
+       .side = side},
+      {.name = "untyped-then-strings",
+       .reference_spec = "proto " + untyped,
+       .prelude = Prelude::kString,
+       .hex = untyped,
+       .value_type = ValueType::kUnknown,
+       .side = side},
+      {.name = "untyped-then-longs",
+       .reference_spec = "proto " + untyped,
+       .prelude = Prelude::kLong,
+       .hex = untyped,
+       .value_type = ValueType::kUnknown,
+       .side = side},
+      {.name = "text-then-strings",
+       .reference_spec = built("strings"),
+       .prelude = Prelude::kString,
+       .hex = "",
+       .value_type = ValueType::kBytesOrUtf8String,
+       .side = side},
+      {.name = "longs-then-longs",
+       .reference_spec = built("longs"),
+       .prelude = Prelude::kLong,
+       .hex = "",
+       .value_type = ValueType::kUnsignedInt64,
+       .side = side},
+  };
+}
+
+// The harness commands for a state's prelude, one per value; those on
+// the operand carry the OPERAND_ prefix. The strings added are
+// "value-0", "value-1" and so on, the longs 0, 1 and so on.
+std::string PreludeCommands(const AdmittedState& state,
+                            std::string_view prefix) {
+  std::string commands;
+  for (int value = 0; value < state.side.values; ++value) {
+    switch (state.prelude) {
+      case Prelude::kString:
+        commands += std::format("{}ADD_STRING {}\n", prefix,
+                                EncodeBase64(std::format("value-{}", value)));
+        break;
+      case Prelude::kLong:
+        commands += std::format("{}ADD_LONG {}\n", prefix, value);
+        break;
+      case Prelude::kNone:
+        return "";
+    }
+  }
+  return commands;
+}
+
+std::expected<HyperLogLogPlusPlus, zetasketch::utils::Error> BuildAdmittedState(
+    const AdmittedState& state) {
+  auto built = state.hex.empty()
+                   ? HyperLogLogPlusPlus::Create(state.side.np, state.side.sp,
+                                                 state.value_type)
+                   : HyperLogLogPlusPlus::FromBytes(ParseHexString(state.hex));
+  if (!built.has_value()) return built;
+  for (int value = 0; value < state.side.values; ++value) {
+    std::expected<void, zetasketch::utils::Error> added;
+    switch (state.prelude) {
+      case Prelude::kString:
+        added = built->Add(std::format("value-{}", value));
+        break;
+      case Prelude::kLong:
+        added = built->Add(int64_t{value});
+        break;
+      case Prelude::kNone:
+        return built;
+    }
+    if (!added.has_value()) return std::unexpected(added.error());
+  }
+  return built;
+}
+
+// One block of the matrix script: the receiver and operand put into
+// their states, merged, written and estimated, then given a long and a
+// string in the order asked for, written after each. A refusal prints
+// under the reference's marker and the script continues, so the block
+// has the same shape whichever way each step goes.
+// The values added after the merge, chosen not to be among any prelude's:
+// the long 1000000 and the string "post".
+constexpr std::string_view kPostLong = "ADD_LONG 1000000";
+constexpr std::string_view kPostString = "ADD_STRING cG9zdA==";
+
+std::string ReferenceMatrixBlock(std::string_view pairing,
+                                 const AdmittedState& receiver,
+                                 const AdmittedState& operand,
+                                 bool long_first) {
+  std::string block = std::format(
+      "MARK {}/{}/{}/{}\nRECEIVER {}\n", pairing, receiver.name, operand.name,
+      long_first ? "long-first" : "string-first", receiver.reference_spec);
+  block += PreludeCommands(receiver, "");
+  block += "OPERAND " + operand.reference_spec + "\n";
+  block += PreludeCommands(operand, "OPERAND_");
+  block += "MERGE_OPERAND\nCHECKPOINT\nRESULT\n";
+  const std::string_view first = long_first ? kPostLong : kPostString;
+  const std::string_view second = long_first ? kPostString : kPostLong;
+  block += std::format("{}\nCHECKPOINT\n{}\nCHECKPOINT\n", first, second);
+  return block;
+}
+
+// The same block, performed by this library, printed as the reference
+// prints it.
+std::vector<std::string> CppMatrixBlock(const AdmittedState& receiver_state,
+                                        const AdmittedState& operand_state,
+                                        bool long_first) {
+  std::vector<std::string> lines;
+  auto receiver = BuildAdmittedState(receiver_state);
+  auto operand = BuildAdmittedState(operand_state);
+  if (!receiver.has_value() || !operand.has_value()) {
+    ADD_FAILURE() << "could not build " << receiver_state.name << " and "
+                  << operand_state.name;
+    return lines;
+  }
+  auto merged = receiver->Merge(std::move(*operand));
+  if (!merged.has_value()) {
+    lines.push_back("ERROR " + merged.error().message);
+  }
+  const auto checkpoint = [&receiver, &lines]() {
+    auto bytes = receiver->Serialize();
+    lines.push_back(bytes.has_value() ? PrintHex(*bytes)
+                                      : "ERROR " + bytes.error().message);
+  };
+  checkpoint();
+  auto result = receiver->Result();
+  lines.push_back(result.has_value() ? std::to_string(*result)
+                                     : "ERROR " + result.error().message);
+  const auto add = [&receiver, &lines, &checkpoint](bool as_long) {
+    auto added =
+        as_long ? receiver->Add(int64_t{1000000}) : receiver->Add("post");
+    if (!added.has_value()) {
+      lines.push_back("ERROR " + added.error().message);
+    }
+    checkpoint();
+  };
+  add(long_first);
+  add(!long_first);
+  return lines;
+}
+
+// Every pair of states a receiver and an operand can be in, merged both
+// as the reference merges them and as this library does, then given
+// each kind of addition this library offers, in both orders. What is
+// compared is everything the reference prints: whether the merge was
+// refused and in what words, the bytes and the estimate afterwards, and
+// for each addition whether it was refused and in what words and the
+// bytes it left. The last is where a merge that narrowed the set shows:
+// an addition to a set narrowed to one kind writes no value type, in
+// either library.
+//
+// The whole matrix runs at five pairings of configuration, so that the
+// admitted set is exercised whichever representation each side is in:
+// both sparse; a dense receiver and a sparse operand, and the reverse;
+// an operand at higher precisions than the receiver, which the merge
+// lowers; and both sides at the minimum precision with enough values
+// added to have been promoted past the sparse threshold.
+TEST(ReferenceLibraryTest,
+     MergeAdmittedKindsAgreeWithTheReferenceInEveryState) {
+  struct Pairing {
+    std::string_view name;
+    Side receiver;
+    Side operand;
+  };
+  const std::array<Pairing, 5> pairings = {{
+      {.name = "sparse-sparse",
+       .receiver = {.np = 10, .sp = 15, .values = 1},
+       .operand = {.np = 10, .sp = 15, .values = 1}},
+      {.name = "dense-sparse",
+       .receiver = {.np = 10, .sp = 0, .values = 1},
+       .operand = {.np = 10, .sp = 15, .values = 1}},
+      {.name = "sparse-dense",
+       .receiver = {.np = 10, .sp = 15, .values = 1},
+       .operand = {.np = 10, .sp = 0, .values = 1}},
+      {.name = "operand-at-higher-precisions",
+       .receiver = {.np = 10, .sp = 15, .values = 1},
+       .operand = {.np = 15, .sp = 20, .values = 1}},
+      {.name = "promoted",
+       .receiver = {.np = 4, .sp = 9, .values = 30},
+       .operand = {.np = 4, .sp = 9, .values = 30}},
+  }};
+
+  for (const Pairing& pairing : pairings) {
+    const std::vector<AdmittedState> receivers =
+        AdmittedStates(pairing.receiver);
+    const std::vector<AdmittedState> operands = AdmittedStates(pairing.operand);
+    std::string script;
+    for (const AdmittedState& receiver : receivers) {
+      for (const AdmittedState& operand : operands) {
+        script += ReferenceMatrixBlock(pairing.name, receiver, operand, true);
+        script += ReferenceMatrixBlock(pairing.name, receiver, operand, false);
+      }
+    }
+    const auto blocks = SplitAtMarks(RunScriptWithReceivers(script));
+    ASSERT_EQ(blocks.size(), receivers.size() * operands.size() * 2)
+        << pairing.name;
+
+    size_t index = 0;
+    for (const AdmittedState& receiver : receivers) {
+      for (const AdmittedState& operand : operands) {
+        for (const bool long_first : {true, false}) {
+          const auto& [name, reference] = blocks.at(index++);
+          ASSERT_EQ(name,
+                    std::format("{}/{}/{}/{}", pairing.name, receiver.name,
+                                operand.name,
+                                long_first ? "long-first" : "string-first"));
+          ASSERT_FALSE(reference.empty()) << name;
+          EXPECT_EQ(CppMatrixBlock(receiver, operand, long_first), reference)
+              << name;
+        }
+      }
+    }
+  }
+}
+
+// A sketch built from a normal precision alone takes the sparse
+// precision the reference's builder would choose. Every normal
+// precision from one below the minimum to one above the maximum is
+// built through both, for each value type the reference builds for,
+// and compared empty, after additions where this library can make
+// them, and estimated. The two refused precisions are compared in the
+// words of their refusal.
+TEST(ReferenceLibraryTest,
+     TheDefaultSparsePrecisionAgreesWithTheReferenceBuilder) {
+  using zetasketch::hll::ValueType;
+  struct Kind {
+    std::string_view word;
+    ValueType value_type;
+  };
+  const std::array<Kind, 3> kinds = {{
+      {.word = "strings", .value_type = ValueType::kBytesOrUtf8String},
+      {.word = "longs", .value_type = ValueType::kUnsignedInt64},
+      {.word = "integers", .value_type = ValueType::kUnsignedInt32},
+  }};
+  const int first = HyperLogLogPlusPlus::kMinimumPrecision - 1;
+  const int last = HyperLogLogPlusPlus::kMaximumPrecision + 1;
+
+  std::string script;
+  for (int np = first; np <= last; ++np) {
+    for (const Kind& kind : kinds) {
+      script += std::format("MARK {}/{}\nRECEIVER {} {} default\nCHECKPOINT\n",
+                            np, kind.word, kind.word, np);
+      if (kind.word == "strings") {
+        script += "ADD_STRING YQ==\nADD_STRING Yg==\nADD_STRING Yw==\n";
+      } else if (kind.word == "longs") {
+        script += "ADD_LONG 1\nADD_LONG 2\nADD_LONG 3\n";
+      }
+      script += "CHECKPOINT\nRESULT\n";
+    }
+  }
+  const auto blocks = SplitAtMarks(RunScriptWithReceivers(script));
+  ASSERT_EQ(blocks.size(),
+            static_cast<size_t>(last - first + 1) * kinds.size());
+
+  size_t index = 0;
+  for (int np = first; np <= last; ++np) {
+    for (const Kind& kind : kinds) {
+      const auto& [name, reference] = blocks.at(index++);
+      ASSERT_EQ(name, std::format("{}/{}", np, kind.word));
+      ASSERT_FALSE(reference.empty()) << name;
+
+      auto sketch = HyperLogLogPlusPlus::Create(np, kind.value_type);
+      if (!sketch.has_value()) {
+        EXPECT_EQ("ERROR " + sketch.error().message, reference.front()) << name;
+        continue;
+      }
+      std::vector<std::string> mine;
+      const auto checkpoint = [&sketch, &mine]() {
+        auto bytes = sketch->Serialize();
+        mine.push_back(bytes.has_value() ? PrintHex(*bytes)
+                                         : "ERROR " + bytes.error().message);
+      };
+      checkpoint();
+      if (kind.word == "strings") {
+        for (const std::string_view value : {"a", "b", "c"}) {
+          EXPECT_TRUE(sketch->Add(value).has_value()) << name;
+        }
+      } else if (kind.word == "longs") {
+        for (const int64_t value : {1, 2, 3}) {
+          EXPECT_TRUE(sketch->Add(value).has_value()) << name;
+        }
+      }
+      checkpoint();
+      auto result = sketch->Result();
+      mine.push_back(result.has_value() ? std::to_string(*result)
+                                        : "ERROR " + result.error().message);
+      EXPECT_EQ(mine, reference) << name;
+    }
+  }
+}
 
 }  // namespace
 

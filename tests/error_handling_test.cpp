@@ -1,5 +1,8 @@
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <format>
 #include <limits>
 #include <string>
@@ -14,6 +17,7 @@
 #include "zetasketch/hll/state.h"
 #include "zetasketch/hyperloglogplusplus.h"
 #include "zetasketch/utils/error.h"
+#include "zetasketch/utils/iterators.h"
 
 namespace {
 
@@ -1867,6 +1871,509 @@ TEST(ErrorHandlingTest, FromBytesRefusesPrecisionsOutsideTheAcceptedRange) {
     EXPECT_EQ(sketch.error().code,
               zetasketch::utils::ErrorCode::kIllegalArgument)
         << shape.description;
+  }
+}
+
+std::string HexOfBytes(const std::vector<uint8_t>& bytes) {
+  std::string hex;
+  hex.reserve(bytes.size() * 2);
+  for (const uint8_t byte : bytes) {
+    hex += std::format("{:02x}", byte);
+  }
+  return hex;
+}
+
+// Writes the sketch and returns its bytes as the reference harness
+// prints them. Writing compacts, as the reference's does.
+std::string SerializedHex(HyperLogLogPlusPlus& sketch) {
+  auto bytes = sketch.Serialize();
+  EXPECT_TRUE(bytes.has_value());
+  return bytes.has_value() ? HexOfBytes(*bytes) : "";
+}
+
+// The value type a written sketch carries, read back from its bytes.
+zetasketch::hll::ValueType WrittenValueType(HyperLogLogPlusPlus& sketch) {
+  auto bytes = sketch.Serialize();
+  EXPECT_TRUE(bytes.has_value());
+  if (!bytes.has_value()) return zetasketch::hll::ValueType::kUnknown;
+  auto state = State::Parse(*bytes);
+  EXPECT_TRUE(state.has_value());
+  return state.has_value() ? state->value_type
+                           : zetasketch::hll::ValueType::kUnknown;
+}
+
+// Empty sketches at normal precision 10 and sparse precision 15, as the
+// reference writes them: with no value type, and typed for text, longs
+// and integers.
+constexpr std::string_view kUntypedAt10And15 = "087010001802820706180a200f3200";
+constexpr std::string_view kUntypedAt10And20 = "087010001802820706180a20143200";
+
+// The six pairs of freshly built sketches whose admitted kinds have
+// nothing in common. Each refusal is in the reference's words, with the
+// receiver's set named first, and the receiver is left as it was.
+TEST(ErrorHandlingTest, MergeRefusesSketchesWhoseAdmittedKindsAreDisjoint) {
+  using zetasketch::hll::ValueType;
+  struct RefusedPair {
+    ValueType receiver;
+    ValueType operand;
+    const char* message;
+  };
+  const std::vector<RefusedPair> pairs = {
+      {ValueType::kBytesOrUtf8String, ValueType::kUnsignedInt64,
+       "Aggregator of type [STRING, BYTES] is incompatible with aggregator of "
+       "type [LONG]"},
+      {ValueType::kBytesOrUtf8String, ValueType::kUnsignedInt32,
+       "Aggregator of type [STRING, BYTES] is incompatible with aggregator of "
+       "type [INTEGER]"},
+      {ValueType::kUnsignedInt64, ValueType::kBytesOrUtf8String,
+       "Aggregator of type [LONG] is incompatible with aggregator of type "
+       "[STRING]"},
+      {ValueType::kUnsignedInt64, ValueType::kUnsignedInt32,
+       "Aggregator of type [LONG] is incompatible with aggregator of type "
+       "[INTEGER]"},
+      {ValueType::kUnsignedInt32, ValueType::kBytesOrUtf8String,
+       "Aggregator of type [INTEGER] is incompatible with aggregator of type "
+       "[STRING]"},
+      {ValueType::kUnsignedInt32, ValueType::kUnsignedInt64,
+       "Aggregator of type [INTEGER] is incompatible with aggregator of type "
+       "[LONG]"},
+  };
+  for (const RefusedPair& pair : pairs) {
+    auto receiver = HyperLogLogPlusPlus::Create(10, 15, pair.receiver);
+    auto operand = HyperLogLogPlusPlus::Create(10, 15, pair.operand);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value()) << pair.message;
+    // The operand carries a value where this library can add one, so
+    // that a merge that went through would change the receiver's bytes.
+    // The text operand's addition narrows its set to strings alone, and
+    // the refusal names the set as it then stands.
+    if (pair.operand == ValueType::kUnsignedInt64) {
+      ASSERT_TRUE(operand->Add(int64_t{7}).has_value());
+    } else if (pair.operand == ValueType::kBytesOrUtf8String) {
+      ASSERT_TRUE(operand->Add("a").has_value());
+    }
+    const std::string before = SerializedHex(*receiver);
+
+    auto merged = receiver->Merge(std::move(*operand));
+    ASSERT_FALSE(merged.has_value()) << pair.message;
+    EXPECT_EQ(merged.error().code,
+              zetasketch::utils::ErrorCode::kIllegalArgument);
+    EXPECT_EQ(merged.error().message, pair.message);
+    EXPECT_EQ(SerializedHex(*receiver), before) << pair.message;
+    EXPECT_EQ(receiver->Result().value_or(-1), 0) << pair.message;
+  }
+}
+
+// A merge narrows the receiver's admitted kinds to what both sketches
+// admit, and writes no value type while doing it. The bytes here are
+// the reference's own for the same operations.
+TEST(ErrorHandlingTest, MergeIntersectsTheAdmittedKindsWithoutRecordingAType) {
+  using zetasketch::hll::ValueType;
+  using zetasketch::utils::ErrorCode;
+
+  // An untyped receiver takes a longs operand and admits longs alone
+  // afterwards, yet still writes no value type, because the set was
+  // already of one kind when the long was added.
+  {
+    auto receiver =
+        HyperLogLogPlusPlus::FromBytes(DecodeHex(kUntypedAt10And15));
+    auto operand =
+        HyperLogLogPlusPlus::Create(10, 15, ValueType::kUnsignedInt64);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+
+    auto refused = receiver->Add("x");
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().code, ErrorCode::kIllegalArgument);
+    EXPECT_EQ(refused.error().message,
+              "unable to add type STRING to aggregator of type [LONG]");
+
+    ASSERT_TRUE(receiver->Add(int64_t{2}).has_value());
+    EXPECT_EQ(SerializedHex(*receiver),
+              "08701001180282070b1001180a200f3203f18301");
+    EXPECT_EQ(WrittenValueType(*receiver), ValueType::kUnknown);
+  }
+
+  // An untyped receiver takes an operand narrowed to strings and admits
+  // strings alone afterwards.
+  {
+    auto receiver =
+        HyperLogLogPlusPlus::FromBytes(DecodeHex(kUntypedAt10And15));
+    auto operand =
+        HyperLogLogPlusPlus::Create(10, 15, ValueType::kBytesOrUtf8String);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    ASSERT_TRUE(operand->Add("a").has_value());
+    ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+
+    auto refused = receiver->Add(int64_t{2});
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().message,
+              "unable to add type LONG to aggregator of type [STRING]");
+    ASSERT_TRUE(receiver->Add("b").has_value());
+    EXPECT_EQ(WrittenValueType(*receiver), ValueType::kUnknown);
+  }
+
+  // A text receiver that takes an untyped operand keeps admitting both
+  // text and byte arrays, and says so when it refuses a long.
+  {
+    auto receiver =
+        HyperLogLogPlusPlus::Create(10, 15, ValueType::kBytesOrUtf8String);
+    auto operand = HyperLogLogPlusPlus::FromBytes(DecodeHex(kUntypedAt10And15));
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+
+    auto refused = receiver->Add(int64_t{2});
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().message,
+              "unable to add type LONG to aggregator of type [STRING, BYTES]");
+  }
+
+  // Two untyped sketches merged still admit everything, so the first
+  // addition afterwards narrows the set and does record its type.
+  {
+    auto receiver =
+        HyperLogLogPlusPlus::FromBytes(DecodeHex(kUntypedAt10And15));
+    auto operand = HyperLogLogPlusPlus::FromBytes(DecodeHex(kUntypedAt10And15));
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+    EXPECT_EQ(WrittenValueType(*receiver), ValueType::kUnknown);
+
+    ASSERT_TRUE(receiver->Add(int64_t{2}).has_value());
+    EXPECT_EQ(WrittenValueType(*receiver), ValueType::kUnsignedInt64);
+    auto refused = receiver->Add("b");
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().message,
+              "unable to add type STRING to aggregator of type [LONG]");
+  }
+}
+
+// The reference narrows the admitted kinds before it merges the
+// representations, so a merge its encodings then refuse has narrowed
+// the set all the same. The bytes are the reference's own.
+TEST(ErrorHandlingTest,
+     AMergeRefusedForItsPrecisionsHasAlreadyNarrowedTheAdmittedKinds) {
+  using zetasketch::hll::ValueType;
+  using zetasketch::utils::ErrorCode;
+  constexpr std::string_view kPrecisionMessage =
+      "Precisions (p=10, sp=20) are not compatible to (p=15, sp=15)";
+
+  {
+    auto receiver =
+        HyperLogLogPlusPlus::FromBytes(DecodeHex(kUntypedAt10And20));
+    auto operand =
+        HyperLogLogPlusPlus::Create(15, 15, ValueType::kUnsignedInt64);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    auto merged = receiver->Merge(std::move(*operand));
+    ASSERT_FALSE(merged.has_value());
+    EXPECT_EQ(merged.error().code, ErrorCode::kIncompatiblePrecision);
+    EXPECT_EQ(merged.error().message, kPrecisionMessage);
+
+    auto refused = receiver->Add("a");
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().message,
+              "unable to add type STRING to aggregator of type [LONG]");
+    EXPECT_EQ(SerializedHex(*receiver), kUntypedAt10And20);
+  }
+  {
+    auto receiver =
+        HyperLogLogPlusPlus::FromBytes(DecodeHex(kUntypedAt10And20));
+    auto operand =
+        HyperLogLogPlusPlus::Create(15, 15, ValueType::kUnsignedInt64);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    ASSERT_FALSE(receiver->Merge(std::move(*operand)).has_value());
+
+    ASSERT_TRUE(receiver->Add(int64_t{5}).has_value());
+    EXPECT_EQ(SerializedHex(*receiver),
+              "08701001180282070b1001180a20143203e4f707");
+  }
+}
+
+// Two sketches that admit nothing in common are refused for that,
+// whatever their precisions.
+TEST(ErrorHandlingTest, DisjointKindsAreReportedBeforeIncompatiblePrecisions) {
+  using zetasketch::hll::ValueType;
+  auto receiver =
+      HyperLogLogPlusPlus::Create(10, 20, ValueType::kBytesOrUtf8String);
+  auto operand = HyperLogLogPlusPlus::Create(15, 15, ValueType::kUnsignedInt64);
+  ASSERT_TRUE(receiver.has_value() && operand.has_value());
+  auto merged = receiver->Merge(std::move(*operand));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_EQ(merged.error().message,
+            "Aggregator of type [STRING, BYTES] is incompatible with "
+            "aggregator of type [LONG]");
+}
+
+// A refused addition leaves the sketch as it was.
+TEST(ErrorHandlingTest, ARefusedAdditionLeavesTheSketchUnchanged) {
+  using zetasketch::hll::ValueType;
+  auto sketch = HyperLogLogPlusPlus::Create(10, 15, ValueType::kUnsignedInt64);
+  ASSERT_TRUE(sketch.has_value());
+  ASSERT_TRUE(sketch->Add(int64_t{1}).has_value());
+  const std::string before = SerializedHex(*sketch);
+  const int64_t estimate = sketch->Result().value_or(-1);
+
+  ASSERT_FALSE(sketch->Add("a").has_value());
+  EXPECT_EQ(SerializedHex(*sketch), before);
+  EXPECT_EQ(sketch->Result().value_or(-1), estimate);
+}
+
+// A sketch built from a normal precision alone takes the sparse
+// precision the reference's builder chooses: five above the normal
+// precision, capped at the maximum. The bytes named are the reference's
+// own for its default-built empty aggregators.
+TEST(ErrorHandlingTest, CreateWithoutASparsePrecisionUsesTheBuilderDefault) {
+  using zetasketch::hll::ValueType;
+  const std::array<ValueType, 3> value_types = {ValueType::kBytesOrUtf8String,
+                                                ValueType::kUnsignedInt64,
+                                                ValueType::kUnsignedInt32};
+  for (int32_t np = HyperLogLogPlusPlus::kMinimumPrecision;
+       np <= HyperLogLogPlusPlus::kMaximumPrecision; ++np) {
+    const int32_t expected_sp =
+        std::min(np + HyperLogLogPlusPlus::kDefaultSparsePrecisionDelta,
+                 HyperLogLogPlusPlus::kMaximumSparsePrecision);
+    for (const ValueType value_type : value_types) {
+      auto by_default = HyperLogLogPlusPlus::Create(np, value_type);
+      auto explicit_sp =
+          HyperLogLogPlusPlus::Create(np, expected_sp, value_type);
+      ASSERT_TRUE(by_default.has_value() && explicit_sp.has_value()) << np;
+      EXPECT_EQ(SerializedHex(*by_default), SerializedHex(*explicit_sp)) << np;
+    }
+  }
+
+  struct Pinned {
+    int32_t np;
+    ValueType value_type;
+    const char* hex;
+  };
+  const std::vector<Pinned> pinned = {
+      {4, ValueType::kBytesOrUtf8String, "087010001802200b820706180420093200"},
+      {20, ValueType::kUnsignedInt64, "0870100018022008820706181420193200"},
+      {21, ValueType::kUnsignedInt32, "0870100018022007820706181520193200"},
+      {24, ValueType::kBytesOrUtf8String, "087010001802200b820706181820193200"},
+  };
+  for (const Pinned& expected : pinned) {
+    auto sketch = HyperLogLogPlusPlus::Create(expected.np, expected.value_type);
+    ASSERT_TRUE(sketch.has_value()) << expected.np;
+    EXPECT_EQ(SerializedHex(*sketch), expected.hex) << expected.np;
+  }
+
+  // No arguments at all builds for text at the default normal precision.
+  auto by_nothing = HyperLogLogPlusPlus::Create();
+  auto by_precision =
+      HyperLogLogPlusPlus::Create(HyperLogLogPlusPlus::kDefaultNormalPrecision);
+  ASSERT_TRUE(by_nothing.has_value() && by_precision.has_value());
+  EXPECT_EQ(SerializedHex(*by_nothing), "087010001802200b820706180f20143200");
+  EXPECT_EQ(SerializedHex(*by_precision), SerializedHex(*by_nothing));
+
+  // Either side of the accepted range is refused in the reference's
+  // words for the normal precision, not for the sparse one derived
+  // from it.
+  for (const int32_t np : {HyperLogLogPlusPlus::kMinimumPrecision - 1,
+                           HyperLogLogPlusPlus::kMaximumPrecision + 1}) {
+    auto refused = HyperLogLogPlusPlus::Create(np);
+    ASSERT_FALSE(refused.has_value()) << np;
+    EXPECT_EQ(refused.error().code,
+              zetasketch::utils::ErrorCode::kIllegalArgument);
+    EXPECT_EQ(refused.error().message,
+              std::format("Expected normal precision to be >= 4 and <= 24 "
+                          "but was {}",
+                          np));
+  }
+}
+
+// A sparse stream of the given values, difference encoded as the
+// reference encodes one.
+std::vector<uint8_t> EncodedStream(const std::vector<uint32_t>& values) {
+  zetasketch::utils::DifferenceEncoder encoder;
+  for (const uint32_t value : values) {
+    EXPECT_TRUE(encoder.PutInt(static_cast<int32_t>(value)).has_value());
+  }
+  return std::move(encoder).IntoVec();
+}
+
+// Reads a sparse sketch back from a state whose stream is given as
+// bytes. Reading does not walk the stream, so any bytes are accepted
+// here; Validate is what reads them.
+std::expected<HyperLogLogPlusPlus, zetasketch::utils::Error> SparseSketchOf(
+    int32_t precision, int32_t sparse_precision, int32_t sparse_size,
+    std::vector<uint8_t> stream) {
+  State state;
+  state.encoding_version = 2;
+  state.precision = precision;
+  state.sparse_precision = sparse_precision;
+  state.sparse_size = sparse_size;
+  state.sparse_data = std::move(stream);
+  auto bytes = state.ToByteArray();
+  if (!bytes.has_value()) return std::unexpected(bytes.error());
+  return HyperLogLogPlusPlus::FromBytes(*bytes);
+}
+
+// Every way a sparse stream can be defective, each read back without
+// complaint and then refused by the full walk with the defect named.
+// At normal precision 10 and sparse precision 15 the flag bit is
+// 1 << 16, so a flagged value is the flag, a normal index in the six
+// bits above the rho, and the rho.
+TEST(ErrorHandlingTest, ValidateRefusesEveryDefectInASparseStream) {
+  using zetasketch::utils::ErrorCode;
+  struct Defect {
+    const char* description;
+    int32_t sparse_precision;
+    int32_t sparse_size;
+    std::vector<uint8_t> stream;
+    const char* message;
+  };
+  const uint32_t flag = 1U << 16U;
+  const std::vector<Defect> defects = {
+      {"a varint cut off by the end of the stream",
+       15,
+       1,
+       {0x80},
+       "Varint continues past the end of the buffer"},
+      {"a value equal to the one before it",
+       15,
+       2,
+       {0x05, 0x00},
+       "sparse value 5 at position 1 does not increase on the value 5 before "
+       "it"},
+      {"a difference that wraps the value below the one before it",
+       15,
+       2,
+       {0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F},
+       "sparse value 4 at position 1 does not increase on the value 5 before "
+       "it"},
+      {"an unflagged value at the sparse bucket count", 15, 1,
+       EncodedStream({1U << 15U}),
+       "sparse index 32768 at position 0 is out of range for sparse precision "
+       "15"},
+      {"a flagged value with a bit above the encoding", 15, 1,
+       EncodedStream({flag | (1U << 17U)}),
+       "sparse value 196608 at position 0 has bits above the encoding for "
+       "precisions (10, 15)"},
+      {"a flagged value whose normal index is at the bucket count", 20, 1,
+       EncodedStream({(1U << 20U) | (1U << 17U)}),
+       "normal index 2048 at position 0 is out of range for normal precision "
+       "10"},
+      {"two flagged values naming the same normal index", 15, 2,
+       EncodedStream({flag | (3U << 6U) | 1U, flag | (3U << 6U) | 2U}),
+       "sparse value 65730 at position 1 repeats the sparse index 96 of the "
+       "value before it"},
+      {"an unflagged and a flagged value naming the same sparse index", 15, 2,
+       EncodedStream({32U, flag | (1U << 6U) | 1U}),
+       "sparse value 65601 at position 1 repeats the sparse index 32 of the "
+       "value before it"},
+      {"a sparse size above the number of values", 15, 3,
+       EncodedStream({5U, 9U}),
+       "sparse size 3 is recorded but the sparse stream holds 2 values"},
+      {"a sparse size below the number of values", 15, 1,
+       EncodedStream({5U, 9U}),
+       "sparse size 1 is recorded but the sparse stream holds 2 values"},
+      {"a sparse size with no stream",
+       15,
+       1,
+       {},
+       "sparse size 1 is recorded but the sparse stream holds 0 values"},
+  };
+  for (const Defect& defect : defects) {
+    auto sketch = SparseSketchOf(10, defect.sparse_precision,
+                                 defect.sparse_size, defect.stream);
+    ASSERT_TRUE(sketch.has_value()) << defect.description;
+    auto valid = sketch->Validate();
+    ASSERT_FALSE(valid.has_value()) << defect.description;
+    EXPECT_EQ(valid.error().message, defect.message) << defect.description;
+    if (std::string_view(defect.message).starts_with("Varint")) continue;
+    EXPECT_EQ(valid.error().code, ErrorCode::kInvalidState)
+        << defect.description;
+  }
+
+  // The same shapes with the defects removed pass.
+  auto valid_stream = SparseSketchOf(
+      10, 15, 3, EncodedStream({5U, 9U, flag | (3U << 6U) | 1U}));
+  ASSERT_TRUE(valid_stream.has_value());
+  EXPECT_TRUE(valid_stream->Validate().has_value());
+  auto empty_stream = SparseSketchOf(10, 15, 0, {});
+  ASSERT_TRUE(empty_stream.has_value());
+  EXPECT_TRUE(empty_stream->Validate().has_value());
+}
+
+// A register above the largest value a hash can produce at the
+// sketch's precision is refused; one at that value is not. At precision
+// 4 the largest is 61, and a register with its top bit set is negative
+// to the reference and refused here as above the bound.
+TEST(ErrorHandlingTest, ValidateRefusesARegisterAboveTheLargestAHashProduces) {
+  const auto dense_sketch = [](uint8_t register_value, size_t index) {
+    State state;
+    state.encoding_version = 2;
+    state.precision = 4;
+    state.sparse_precision = 0;
+    state.data = std::vector<uint8_t>(16, 0);
+    (*state.data)[index] = register_value;
+    auto bytes = state.ToByteArray();
+    EXPECT_TRUE(bytes.has_value());
+    return HyperLogLogPlusPlus::FromBytes(*bytes);
+  };
+
+  auto at_bound = dense_sketch(61, 3);
+  ASSERT_TRUE(at_bound.has_value());
+  EXPECT_TRUE(at_bound->Validate().has_value());
+
+  auto above = dense_sketch(62, 3);
+  ASSERT_TRUE(above.has_value());
+  auto refused = above->Validate();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.error().code, zetasketch::utils::ErrorCode::kInvalidState);
+  EXPECT_EQ(refused.error().message,
+            "register 62 at index 3 exceeds 61, the largest a hash can "
+            "produce at precision 4");
+
+  auto negative = dense_sketch(0x80, 0);
+  ASSERT_TRUE(negative.has_value());
+  refused = negative->Validate();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.error().message,
+            "register 128 at index 0 exceeds 61, the largest a hash can "
+            "produce at precision 4");
+}
+
+// A sketch carrying registers is dense, and neither library reads its
+// sparse fields, so the walk does not either: a stream that would be
+// refused in a sparse sketch passes here.
+TEST(ErrorHandlingTest, ValidateDoesNotReadADenseSketchsSparseFields) {
+  State state;
+  state.encoding_version = 2;
+  state.precision = 10;
+  state.sparse_precision = 15;
+  state.sparse_size = 99;
+  state.sparse_data = std::vector<uint8_t>{0x80};
+  state.data = std::vector<uint8_t>(1024, 0);
+  auto bytes = state.ToByteArray();
+  ASSERT_TRUE(bytes.has_value());
+  auto sketch = HyperLogLogPlusPlus::FromBytes(*bytes);
+  ASSERT_TRUE(sketch.has_value());
+  EXPECT_TRUE(sketch->Validate().has_value());
+}
+
+// Everything this library writes passes the walk: both representations,
+// at the boundary precisions, empty, small, and past the promotion
+// threshold, read back from its own bytes.
+TEST(ErrorHandlingTest, ValidateAcceptsEverySketchThisLibraryWrites) {
+  const std::vector<std::pair<int32_t, int32_t>> configurations = {
+      {4, 4}, {4, 9}, {4, 0}, {10, 15}, {15, 20}, {15, 0}, {24, 25}};
+  const std::vector<int> populations = {0, 1, 50, 3000};
+  for (const auto& [np, sp] : configurations) {
+    for (const int population : populations) {
+      auto sketch = HyperLogLogPlusPlus::Create(np, sp);
+      ASSERT_TRUE(sketch.has_value());
+      for (int value = 0; value < population; ++value) {
+        ASSERT_TRUE(sketch->Add(std::format("value-{}", value)).has_value());
+      }
+      auto bytes = sketch->Serialize();
+      ASSERT_TRUE(bytes.has_value());
+      auto reread = HyperLogLogPlusPlus::FromBytes(*bytes);
+      ASSERT_TRUE(reread.has_value()) << np << " " << sp << " " << population;
+      auto valid = reread->Validate();
+      EXPECT_TRUE(valid.has_value())
+          << np << " " << sp << " " << population
+          << (valid.has_value() ? "" : ": " + valid.error().message);
+    }
   }
 }
 

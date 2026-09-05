@@ -131,6 +131,10 @@ TEST(GoldenCorpusTest, VerifyParity) {
       ASSERT_TRUE(sketch_or.has_value())
           << "Failed to deserialize SKETCH " << name;
       auto sketch = std::move(sketch_or.value());
+      // Every sketch the reference writes must pass the full walk.
+      ASSERT_TRUE(sketch.Validate().has_value())
+          << "Validate refused SKETCH " << name << ": "
+          << sketch.Validate().error().message;
 
       auto estimate = sketch.Result();
       ASSERT_TRUE(estimate.has_value()) << "Estimate failed for " << name;
@@ -173,10 +177,17 @@ TEST(GoldenCorpusTest, VerifyParity) {
       EXPECT_EQ(Base64Encode(serialized_str), b64)
           << "Bit-exact parity failed for LONGS " << name;
 
+      // The bytes are the reference's own once the line above holds, so
+      // the full walk must pass on them too.
+      auto reread_or = HyperLogLogPlusPlus::FromBytes(serialized_or.value());
+      ASSERT_TRUE(reread_or.has_value()) << "Failed to reread LONGS " << name;
+      ASSERT_TRUE(reread_or.value().Validate().has_value())
+          << "Validate refused LONGS " << name << ": "
+          << reread_or.value().Validate().error().message;
+
       auto estimate = sketch.Result();
       ASSERT_TRUE(estimate.has_value()) << "Estimate failed for " << name;
-      EXPECT_EQ(estimate.value(),
-                std::stoll(tokens[kLongsCardinalityIndex]))
+      EXPECT_EQ(estimate.value(), std::stoll(tokens[kLongsCardinalityIndex]))
           << "Cardinality mismatch for " << name;
     } else if (type == "MERGE") {
       ASSERT_EQ(tokens.size(), kMergeTokensCount)
@@ -204,9 +215,18 @@ TEST(GoldenCorpusTest, VerifyParity) {
       ASSERT_TRUE(sketch2_or.has_value())
           << "Failed to deserialize sketch2 for " << name;
       auto sketch2 = std::move(sketch2_or.value());
+      ASSERT_TRUE(sketch1.Validate().has_value())
+          << "Validate refused sketch1 for " << name << ": "
+          << sketch1.Validate().error().message;
+      ASSERT_TRUE(sketch2.Validate().has_value())
+          << "Validate refused sketch2 for " << name << ": "
+          << sketch2.Validate().error().message;
 
       auto merge_res = sketch1.Merge(std::move(sketch2));
       ASSERT_TRUE(merge_res.has_value()) << "Failed to merge " << name;
+      ASSERT_TRUE(sketch1.Validate().has_value())
+          << "Validate refused the merged sketch for " << name << ": "
+          << sketch1.Validate().error().message;
 
       auto merged_estimate = sketch1.Result();
       ASSERT_TRUE(merged_estimate.has_value())
