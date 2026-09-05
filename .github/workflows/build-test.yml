@@ -14,6 +14,7 @@ jobs:
   build-test:
     name: Build and test (release) - ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
@@ -46,8 +47,16 @@ jobs:
             bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-${{ github.workflow }}-
             bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-
 
+      - name: Cache Bazel repository cache
+        uses: actions/cache@v4
+        with:
+          path: .bazel-repos
+          key: bazel-repos-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-repos-${{ runner.arch }}-
+
       - name: Ensure Bazel cache directory exists
-        run: mkdir -p .bazel-cache
+        run: mkdir -p .bazel-cache .bazel-repos
 
       - name: Execute Bazel release test suite
         env:

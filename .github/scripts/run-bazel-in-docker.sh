@@ -80,12 +80,20 @@ DOCKER_OPTS+=(--user "$(id -u):$(id -g)")
 DOCKER_OPTS+=(-e HOME=/tmp)
 DOCKER_OPTS+=(-e USER=zetasketch-cpp)
 DOCKER_OPTS+=(-v "$WORKSPACE_DIR:/workspace")
+# The repository cache is mounted separately from the build cache. What
+# it holds is decided by the dependency lock file, which changes rarely,
+# where the build cache turns over with every commit. Kept together they
+# shared one key and the dependencies were fetched again on almost every
+# run, which is a fetch from a package host that has already failed a
+# job outright.
 if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    mkdir -p "$WORKSPACE_DIR/.bazel-cache"
+    mkdir -p "$WORKSPACE_DIR/.bazel-cache" "$WORKSPACE_DIR/.bazel-repos"
     DOCKER_OPTS+=(-v "$WORKSPACE_DIR/.bazel-cache:/tmp/bazel-cache")
+    DOCKER_OPTS+=(-v "$WORKSPACE_DIR/.bazel-repos:/tmp/bazel-repos")
 else
-    mkdir -p "$HOME/.cache/bazel"
+    mkdir -p "$HOME/.cache/bazel" "$HOME/.cache/bazel-repos"
     DOCKER_OPTS+=(-v "$HOME/.cache/bazel:/tmp/bazel-cache")
+    DOCKER_OPTS+=(-v "$HOME/.cache/bazel-repos:/tmp/bazel-repos")
     if [ -f "$WORKSPACE_DIR/.local_docker_opts.sh" ]; then
         # shellcheck disable=SC1091
         source "$WORKSPACE_DIR/.local_docker_opts.sh"
@@ -94,7 +102,7 @@ fi
 DOCKER_OPTS+=(-w /workspace)
 
 BAZEL_OPTS=()
-BAZEL_OPTS+=(--disk_cache=/tmp/bazel-cache --repository_cache=/tmp/bazel-cache/repos)
+BAZEL_OPTS+=(--disk_cache=/tmp/bazel-cache --repository_cache=/tmp/bazel-repos)
 
 # Bazel runs inside the container, where none of the runner's
 # environment is visible, so BuildBuddy has nothing to detect and

@@ -11,6 +11,14 @@ public class ZetaSketchCli {
   // than dropped, and a sign is refused rather than accepted, because a
   // lenient reading would merge an operand the script did not name and
   // report nothing.
+  private static String hex(byte[] bytes) {
+    StringBuilder sb = new StringBuilder();
+    for (byte b : bytes) {
+      sb.append(String.format("%02x", b));
+    }
+    return sb.toString();
+  }
+
   private static byte[] parseHex(String text) {
     if (text.length() % 2 != 0) {
       throw new IllegalArgumentException(
@@ -163,6 +171,88 @@ public class ZetaSketchCli {
         }
         System.out.println(sb.toString());
       }
+    } else if ("CREATE_BATCH".equals(mode)) {
+      // Builds many sketches in one invocation. Each block begins with
+      // a SKETCH line carrying the two precisions and is followed by
+      // its values, one per line and encoded so that no value can be
+      // mistaken for a header. One line of output is written per
+      // block, in order. Starting a virtual machine costs far more
+      // than building a sketch, so batching the blocks that a
+      // comparison needs turns hundreds of starts into one.
+      Scanner scanner = new Scanner(System.in);
+      HyperLogLogPlusPlus<String> hll = null;
+      StringBuilder out = new StringBuilder();
+      while (scanner.hasNextLine()) {
+        String line = scanner.nextLine();
+        if (line.isEmpty()) {
+          continue;
+        }
+        if (line.startsWith("SKETCH ")) {
+          if (hll != null) {
+            out.append(hex(hll.serializeToByteArray())).append('\n');
+          }
+          String[] parts = line.split(" ");
+          int normalPrecision = Integer.parseInt(parts[1]);
+          int sparsePrecision = Integer.parseInt(parts[2]);
+          HyperLogLogPlusPlus.Builder builder =
+              new HyperLogLogPlusPlus.Builder().normalPrecision(normalPrecision);
+          if (sparsePrecision == 0) {
+            builder.noSparseMode();
+          } else {
+            builder.sparsePrecision(sparsePrecision);
+          }
+          hll = builder.buildForStrings();
+        } else if (line.startsWith("ITEM ")) {
+          if (hll == null) {
+            throw new IllegalStateException("ITEM before SKETCH");
+          }
+          hll.add(new String(Base64.getDecoder().decode(line.substring(5)), UTF_8));
+        } else {
+          throw new IllegalStateException("unexpected line: " + line);
+        }
+      }
+      if (hll != null) {
+        out.append(hex(hll.serializeToByteArray())).append('\n');
+      }
+      System.out.print(out);
+    } else if ("MERGE_BATCH".equals(mode)) {
+      // Merges many groups of sketches in one invocation. Each block
+      // begins with a MERGE line and is followed by its operands as
+      // hexadecimal, which cannot be mistaken for the header. One line
+      // of output is written per block, in order.
+      Scanner scanner = new Scanner(System.in);
+      HyperLogLogPlusPlus<String> hll = null;
+      boolean inBlock = false;
+      StringBuilder out = new StringBuilder();
+      while (scanner.hasNextLine()) {
+        String line = scanner.nextLine().trim();
+        if (line.isEmpty()) {
+          continue;
+        }
+        if ("MERGE".equals(line)) {
+          if (inBlock) {
+            out.append(hll == null ? "" : hex(hll.serializeToByteArray())).append('\n');
+          }
+          hll = null;
+          inBlock = true;
+        } else {
+          if (!inBlock) {
+            throw new IllegalStateException("operand before MERGE");
+          }
+          @SuppressWarnings("unchecked")
+          HyperLogLogPlusPlus<String> other =
+              (HyperLogLogPlusPlus<String>) HyperLogLogPlusPlus.forProto(parseHex(line));
+          if (hll == null) {
+            hll = other;
+          } else {
+            hll.merge(other);
+          }
+        }
+      }
+      if (inBlock) {
+        out.append(hll == null ? "" : hex(hll.serializeToByteArray())).append('\n');
+      }
+      System.out.print(out);
     } else if ("SCRIPT".equals(mode)) {
       // Applies a sequence of commands to one sketch, so that a
       // comparison can reach the states an operation leaves behind for

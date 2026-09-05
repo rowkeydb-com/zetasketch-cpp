@@ -1368,13 +1368,31 @@ TEST_P(DifferentialFuzzerTest, Create) {
   const int sp = GetParam().second;
 
   const std::vector<int> counts = {10, 100, 1000, 5000};
-  for (const int num : counts) {
-    auto [items, input_data] = GenerateTestItems("item_", num);
 
-    const std::string cpp_out = CppCreate(np, sp, items);
-    const std::string java_out = RunJava("CREATE", np, sp, input_data);
-    EXPECT_EQ(cpp_out, java_out)
-        << "Mismatch at NP=" << np << " SP=" << sp << " Elements=" << num;
+  // Every population is built in one invocation of the reference.
+  // Starting a virtual machine costs far more than building a sketch,
+  // so asking for all four at once is the difference between four
+  // starts and one, at every configuration.
+  std::string batch;
+  std::vector<std::vector<std::string>> populations;
+  populations.reserve(counts.size());
+  for (const int num : counts) {
+    auto [items, unused_input] = GenerateTestItems("item_", num);
+    batch += std::format("SKETCH {} {}\n", np, sp);
+    for (const std::string& item : items) {
+      batch += "ITEM " + EncodeBase64(item) + "\n";
+    }
+    populations.push_back(std::move(items));
+  }
+
+  const std::vector<std::string> reference =
+      SplitLines(RunJava("CREATE_BATCH", np, sp, batch));
+  ASSERT_EQ(reference.size(), counts.size()) << "NP=" << np << " SP=" << sp;
+
+  for (size_t i = 0; i < counts.size(); ++i) {
+    EXPECT_EQ(CppCreate(np, sp, populations.at(i)), reference.at(i))
+        << "Mismatch at NP=" << np << " SP=" << sp
+        << " Elements=" << counts.at(i);
   }
 }
 
@@ -1388,26 +1406,55 @@ TEST_P(DifferentialFuzzerTest, Merge) {
       {10, 200}   // mixed
   };
 
-  for (const auto& config : merge_configs) {
-    const int num_sketches = config.first;
-    const int items_per_sketch = config.second;
-
-    std::vector<std::string> cpp_hexes;
-    std::string java_merge_in;
-
+  // Both halves are batched: every operand of every configuration is
+  // built in one invocation, and every merge is performed in a second.
+  // Done one at a time this was nineteen starts of a virtual machine
+  // for each configuration, which was the largest single cost in this
+  // suite.
+  std::string create_batch;
+  std::vector<std::vector<std::string>> cpp_operands(merge_configs.size());
+  for (size_t config = 0; config < merge_configs.size(); ++config) {
+    const int num_sketches = merge_configs.at(config).first;
+    const int items_per_sketch = merge_configs.at(config).second;
     for (int i = 0; i < num_sketches; ++i) {
-      const std::string prefix = "test_" + std::to_string(i) + "_";
-      auto [items, input_data] = GenerateTestItems(prefix, items_per_sketch);
-
-      cpp_hexes.push_back(CppCreate(np, sp, items));
-      java_merge_in += RunJava("CREATE", np, sp, input_data) + "\n";
+      auto [items, unused_input] = GenerateTestItems(
+          "test_" + std::to_string(i) + "_", items_per_sketch);
+      create_batch += std::format("SKETCH {} {}\n", np, sp);
+      for (const std::string& item : items) {
+        create_batch += "ITEM " + EncodeBase64(item) + "\n";
+      }
+      cpp_operands.at(config).push_back(CppCreate(np, sp, items));
     }
+  }
 
-    const std::string cpp_merged = CppMerge(np, sp, cpp_hexes);
-    const std::string java_merged = RunJava("MERGE", np, sp, java_merge_in);
+  const std::vector<std::string> reference_operands =
+      SplitLines(RunJava("CREATE_BATCH", np, sp, create_batch));
+  size_t expected_operands = 0;
+  for (const auto& merge_config : merge_configs) {
+    expected_operands += static_cast<size_t>(merge_config.first);
+  }
+  ASSERT_EQ(reference_operands.size(), expected_operands)
+      << "NP=" << np << " SP=" << sp;
 
-    EXPECT_EQ(cpp_merged, java_merged)
-        << "Mismatch at Merge NP=" << np << " SP=" << sp;
+  std::string merge_batch;
+  size_t taken = 0;
+  for (const auto& merge_config : merge_configs) {
+    merge_batch += "MERGE\n";
+    for (int i = 0; i < merge_config.first; ++i) {
+      merge_batch += reference_operands.at(taken++) + "\n";
+    }
+  }
+
+  const std::vector<std::string> reference_merged =
+      SplitLines(RunJava("MERGE_BATCH", np, sp, merge_batch));
+  ASSERT_EQ(reference_merged.size(), merge_configs.size())
+      << "NP=" << np << " SP=" << sp;
+
+  for (size_t config = 0; config < merge_configs.size(); ++config) {
+    EXPECT_EQ(CppMerge(np, sp, cpp_operands.at(config)),
+              reference_merged.at(config))
+        << "Mismatch at Merge NP=" << np << " SP=" << sp
+        << " sketches=" << merge_configs.at(config).first;
   }
 }
 

@@ -54,8 +54,16 @@ jobs:
             bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-${{ matrix.config }}-
             bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-
 
+      - name: Cache Bazel repository cache
+        uses: actions/cache@v4
+        with:
+          path: .bazel-repos
+          key: bazel-repos-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock') }}
+          restore-keys: |
+            bazel-repos-${{ runner.arch }}-
+
       - name: Ensure Bazel cache directory exists
-        run: mkdir -p .bazel-cache
+        run: mkdir -p .bazel-cache .bazel-repos
 
       - name: Execute Bazel test suite under ${{ matrix.config }} sanitizer
         env:
