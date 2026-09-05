@@ -95,6 +95,48 @@ DOCKER_OPTS+=(-w /workspace)
 
 BAZEL_OPTS=()
 BAZEL_OPTS+=(--disk_cache=/tmp/bazel-cache --repository_cache=/tmp/bazel-cache/repos)
+
+# Bazel runs inside the container, where none of the runner's
+# environment is visible, so BuildBuddy has nothing to detect and
+# records every invocation with no repository, branch, commit or user.
+# The values are read here on the host, where the runner's environment
+# is present, and passed in as flags.
+#
+# Only what GitHub already publishes about a public repository is sent:
+# the repository URL, the branch, the commit, the account that
+# triggered the run, and the runner's platform. The API key travels in
+# a request header rather than in metadata, and the environment is left
+# redacted, so nothing here widens what BuildBuddy can see.
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    workflow="${GITHUB_WORKFLOW:-unknown}"
+    workflow="${workflow// /-}"
+    server="${GITHUB_SERVER_URL:-https://github.com}"
+    repository="${GITHUB_REPOSITORY:-}"
+
+    # The command is worth a tag of its own only when it differs from
+    # the configuration; for coverage the two coincide.
+    tags="${workflow},${CONFIG}"
+    if [ "$COMMAND" != "$CONFIG" ]; then
+        tags="${tags},${COMMAND}"
+    fi
+
+    BAZEL_OPTS+=(
+        --build_metadata=ROLE=CI
+        --build_metadata=USER="${GITHUB_ACTOR:-ci}"
+        --build_metadata=HOST="${RUNNER_OS:-unknown}-${RUNNER_ARCH:-unknown}"
+        --build_metadata=COMMIT_SHA="${GITHUB_SHA:-}"
+        --build_metadata=BRANCH_NAME="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+        --build_metadata=TAGS="${tags}"
+        --build_metadata=COMMIT_STATUS_LABEL="${workflow}-${CONFIG}"
+    )
+
+    if [ -n "$repository" ]; then
+        BAZEL_OPTS+=(--build_metadata=REPO_URL="${server}/${repository}")
+        BAZEL_OPTS+=(
+            --build_metadata=BUILDBUDDY_LINKS="[Workflow-run](${server}/${repository}/actions/runs/${GITHUB_RUN_ID:-0})"
+        )
+    fi
+fi
 if [ -n "${BAZEL_REMOTE_CACHE:-}" ]; then
     BAZEL_OPTS+=(--remote_cache="$BAZEL_REMOTE_CACHE" --remote_upload_local_results=true)
     DOCKER_OPTS+=(--add-host=host.docker.internal:host-gateway)
@@ -111,18 +153,22 @@ if [ "$COMMAND" = "coverage" ]; then
     # Run the build and copy the report file out to the workspace
     # root in a single container invocation, so paths inside the
     # container (where Bazel's symlinks resolve) are valid.
-    docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" bash -c "
-        bazel coverage ${BAZEL_OPTS[*]} ${*:-} //...
-        rc=\$?
-        if [ \"\$rc\" -eq 0 ]; then
-            cp \"\$(bazel info output_path)/_coverage/_coverage_report.dat\" \\
+    # The arguments are passed positionally rather than interpolated
+    # into the command string, so that a metadata value holding a
+    # bracket or a parenthesis reaches Bazel intact instead of being
+    # read as shell syntax.
+    docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" bash -c '
+        bazel coverage "$@" //...
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            cp "$(bazel info output_path)/_coverage/_coverage_report.dat" \
                /workspace/coverage.lcov
-        elif [ \"\$rc\" -eq 4 ]; then
+        elif [ "$rc" -eq 4 ]; then
             : > /workspace/coverage.lcov
-            echo \"No test targets in the repository yet; emitting empty coverage.lcov.\"
+            echo "No test targets in the repository yet; emitting empty coverage.lcov."
         fi
-        exit \$rc
-    "
+        exit $rc
+    ' coverage-in-container "${BAZEL_OPTS[@]}" "$@"
 else
     docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" \
         bazel "$COMMAND" "${BAZEL_OPTS[@]}" --config="$CONFIG" "$@" //...
