@@ -87,7 +87,14 @@ jobs:
           fi
 
       - name: Upload to Codecov
-        if: ${{ hashFiles('coverage.lcov') != '' && matrix.os == 'ubuntu-24.04' }}
+        # Codecov files a commit under the branch of its first upload and
+        # never moves it. Main advances by fast-forward, so a commit
+        # uploaded from its topic branch stays filed there when main
+        # reaches it, and main's coverage on Codecov stops at the last
+        # commit that was first seen on main. Uploading only from main
+        # makes the main push the first upload of every commit. Topic
+        # branches still produce and store the lcov and HTML reports.
+        if: ${{ hashFiles('coverage.lcov') != '' && matrix.os == 'ubuntu-24.04' && github.ref == 'refs/heads/main' }}
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
