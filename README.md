@@ -126,7 +126,17 @@ following C++ API methods against the Java equivalents:
     kind of addition in both orders, and the verdicts, messages, bytes
     and estimates compared with the reference's, at six pairings of
     configuration that put each side in each representation, at
-    differing precisions, and past the promotion threshold.
+    differing precisions, and past the promotion threshold. Every merge
+    across sparse precisions at normal precisions 4 to 12, with
+    populations that leave values unflushed on either side, is then
+    performed by both libraries, written and estimated after the merge
+    and after three more additions, and compared line for line: the
+    bytes, the estimates, and the stage at which either refuses. This is
+    the shape that lowers a receiver to its operand's precision and
+    carries the receiver's unflushed values across as they are, so the
+    bytes depend on which values were still unflushed; the unflushed
+    values are held as the reference holds them, as a set of distinct
+    values, because the flush falls at a count of distinct values.
 *   `HyperLogLogPlusPlus::Serialize()`
 *   `HyperLogLogPlusPlus::Result()` (Cardinality estimation parity verified in
     `golden_corpus_test.cpp`).

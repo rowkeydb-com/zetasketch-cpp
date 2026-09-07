@@ -2024,6 +2024,226 @@ TEST(ReferenceLibraryTest,
   }
 }
 
+// One state of the sweep below as two blocks of the reference's script:
+// the receiver and the operand built and given their strings and
+// merged, then, under a second mark, the receiver written and
+// estimated, given three more strings and written again. The second
+// mark is what makes a refusal at the merge distinguishable from one at
+// the first write, since a merge that goes through prints nothing.
+std::string ReferenceSweepBlock(std::string_view name, int32_t np,
+                                int32_t receiver_sp, int receiver_population,
+                                int32_t operand_sp, int operand_population) {
+  std::string block =
+      std::format("MARK {}\nRECEIVER strings {} {}\n", name, np, receiver_sp);
+  for (int i = 0; i < receiver_population; ++i) {
+    block +=
+        std::format("ADD_STRING {}\n", EncodeBase64(std::format("r{}", i)));
+  }
+  block += std::format("OPERAND strings {} {}\n", np, operand_sp);
+  for (int i = 0; i < operand_population; ++i) {
+    block += std::format("OPERAND_ADD_STRING {}\n",
+                         EncodeBase64(std::format("o{}", i)));
+  }
+  block +=
+      std::format("MERGE_OPERAND\nMARK {}/merged\nCHECKPOINT\nRESULT\n", name);
+  for (const std::string_view value : {"x", "y", "z"}) {
+    block += std::format("ADD_STRING {}\n", EncodeBase64(value));
+  }
+  block += "CHECKPOINT\n";
+  return block;
+}
+
+// What this library prints for one state of the sweep: the merge's
+// refusal if there was one, and the lines after the merge as the
+// reference prints them. A sketch this library writes before any
+// refusal must pass the full walk, since its bytes are the reference's.
+// After a refused merge nothing more is performed: the reference's own
+// state is undefined there, so the lines it goes on to print are
+// compared with nothing.
+struct SweepOutcome {
+  std::vector<std::string> merge;
+  std::vector<std::string> after;
+};
+
+SweepOutcome CppSweepBlock(int32_t np, int32_t receiver_sp,
+                           int receiver_population, int32_t operand_sp,
+                           int operand_population) {
+  SweepOutcome outcome;
+  auto receiver = HyperLogLogPlusPlus::Create(np, receiver_sp);
+  auto operand = HyperLogLogPlusPlus::Create(np, operand_sp);
+  if (!receiver.has_value() || !operand.has_value()) {
+    ADD_FAILURE() << "could not build (" << np << ", " << receiver_sp
+                  << ") and (" << np << ", " << operand_sp << ")";
+    return outcome;
+  }
+  for (int i = 0; i < receiver_population; ++i) {
+    EXPECT_TRUE(receiver->Add(std::format("r{}", i)).has_value());
+  }
+  for (int i = 0; i < operand_population; ++i) {
+    EXPECT_TRUE(operand->Add(std::format("o{}", i)).has_value());
+  }
+  auto merged = receiver->Merge(std::move(*operand));
+  if (!merged.has_value()) {
+    outcome.merge.push_back("ERROR " + merged.error().message);
+    return outcome;
+  }
+  std::vector<std::string>& lines = outcome.after;
+  bool refused = false;
+  const auto checkpoint = [&receiver, &lines, &refused]() {
+    auto bytes = receiver->Serialize();
+    if (!bytes.has_value()) {
+      lines.push_back("ERROR " + bytes.error().message);
+      refused = true;
+      return;
+    }
+    lines.push_back(PrintHex(*bytes));
+    if (refused) return;
+    auto reread = HyperLogLogPlusPlus::FromBytes(*bytes);
+    ASSERT_TRUE(reread.has_value());
+    auto valid = reread->Validate();
+    EXPECT_TRUE(valid.has_value())
+        << (valid.has_value() ? "" : valid.error().message);
+  };
+  checkpoint();
+  auto result = receiver->Result();
+  lines.push_back(result.has_value() ? std::to_string(*result)
+                                     : "ERROR " + result.error().message);
+  for (const std::string_view value : {"x", "y", "z"}) {
+    auto added = receiver->Add(value);
+    if (!added.has_value()) {
+      lines.push_back("ERROR " + added.error().message);
+      refused = true;
+    }
+  }
+  checkpoint();
+  return outcome;
+}
+
+// Cuts a block's lines after the first refusal and reduces that line to
+// the fact of the refusal. Where the reference throws, its aggregator
+// is left as the exception found it, which the reference does not
+// define, so what follows is not compared; and the two libraries word
+// a refusal differently, the reference naming the array index it ran
+// past and this library the state it found.
+std::vector<std::string> UpToFirstRefusal(std::vector<std::string> lines) {
+  for (size_t i = 0; i < lines.size(); ++i) {
+    if (lines[i].starts_with("ERROR")) {
+      lines[i] = "ERROR";
+      lines.resize(i + 1);
+      break;
+    }
+  }
+  return lines;
+}
+
+// Every merge across sparse precisions at normal precisions 4 to 12,
+// with populations that leave values unflushed on either side, three
+// additions after the merge, and a write and an estimate at each
+// stage, performed by both libraries in one run of the reference and
+// compared line for line. This is the shape that lowers a receiver to
+// its operand's precision and carries the receiver's unflushed values
+// across as they are, so the bytes depend on exactly which values were
+// still unflushed, which is decided by where the flushes fell. The
+// forty strings on either side repeat an encoding at some precisions,
+// which is what parts a buffer that counts additions from one that
+// counts distinct values.
+//
+// The reference throws in some of these states, at the merge or later,
+// when a carried value is promoted under the lower precision and names
+// a register outside the array. This library refuses the same states
+// at the same stage.
+TEST(ReferenceLibraryTest,
+     EveryMergeAcrossSparsePrecisionsMatchesTheReference) {
+  struct Sweep {
+    std::string name;
+    int32_t np;
+    int32_t receiver_sp;
+    int receiver_population;
+    int32_t operand_sp;
+    int operand_population;
+  };
+  constexpr std::array<int, 3> kPopulations = {0, 3, 40};
+  std::vector<Sweep> sweeps;
+  std::string script;
+  for (int32_t np = HyperLogLogPlusPlus::kMinimumPrecision; np <= 12; ++np) {
+    const std::array<int32_t, 6> sparse_precisions = {
+        HyperLogLogPlusPlus::kSparsePrecisionDisabled,
+        np,
+        np + 1,
+        np + 2,
+        np + 5,
+        HyperLogLogPlusPlus::kMaximumSparsePrecision};
+    for (const int32_t receiver_sp : sparse_precisions) {
+      for (const int32_t operand_sp : sparse_precisions) {
+        for (const int receiver_population : kPopulations) {
+          for (const int operand_population : kPopulations) {
+            sweeps.push_back(
+                {.name = std::format("np={}/receiver-sp={}x{}/operand-sp={}x{}",
+                                     np, receiver_sp, receiver_population,
+                                     operand_sp, operand_population),
+                 .np = np,
+                 .receiver_sp = receiver_sp,
+                 .receiver_population = receiver_population,
+                 .operand_sp = operand_sp,
+                 .operand_population = operand_population});
+            script += ReferenceSweepBlock(sweeps.back().name, np, receiver_sp,
+                                          receiver_population, operand_sp,
+                                          operand_population);
+          }
+        }
+      }
+    }
+  }
+  const auto blocks = SplitAtMarks(RunScriptWithReceivers(script));
+  ASSERT_EQ(blocks.size(), sweeps.size() * 2);
+
+  int refused_at_the_merge = 0;
+  int refused_at_the_first_write = 0;
+  int refused_after_the_additions = 0;
+  for (size_t index = 0; index < sweeps.size(); ++index) {
+    const Sweep& sweep = sweeps[index];
+    const auto& [name, reference_merge] = blocks[index * 2];
+    const auto& [merged_name, reference_after] = blocks[(index * 2) + 1];
+    ASSERT_EQ(name, sweep.name);
+    ASSERT_EQ(merged_name, sweep.name + "/merged");
+    ASSERT_FALSE(reference_after.empty()) << name;
+
+    const SweepOutcome mine =
+        CppSweepBlock(sweep.np, sweep.receiver_sp, sweep.receiver_population,
+                      sweep.operand_sp, sweep.operand_population);
+    const std::vector<std::string> merge = UpToFirstRefusal(reference_merge);
+    EXPECT_EQ(UpToFirstRefusal(mine.merge), merge) << name;
+    const std::vector<std::string> after = UpToFirstRefusal(reference_after);
+    const bool merge_refused = !merge.empty();
+    const bool refused_later = after.back() == "ERROR";
+    if (merge_refused) {
+      ++refused_at_the_merge;
+    } else {
+      EXPECT_EQ(UpToFirstRefusal(mine.after), after) << name;
+      if (refused_later && after.size() == 1) ++refused_at_the_first_write;
+      if (refused_later && after.size() > 1) ++refused_after_the_additions;
+    }
+    if (merge_refused || refused_later) {
+      // The reference throws only for a sparse receiver holding
+      // unflushed values whose operand is sparse at a lower precision.
+      EXPECT_TRUE(sweep.receiver_sp > sweep.operand_sp &&
+                  sweep.operand_sp !=
+                      HyperLogLogPlusPlus::kSparsePrecisionDisabled &&
+                  sweep.receiver_population > 0)
+          << name;
+    }
+  }
+  // The states the reference throws in, of 2916, by stage: at the
+  // merge, at the write after it, and at the write after the three
+  // additions. The comparison above already holds this library to the
+  // same states at the same stages; the counts are what would show a
+  // change in the reference's own behaviour, or a script the harness no
+  // longer runs as intended.
+  EXPECT_EQ(refused_at_the_merge, 21);
+  EXPECT_EQ(refused_at_the_first_write, 9);
+  EXPECT_EQ(refused_after_the_additions, 6);
+}
+
 // A sketch built from a normal precision alone takes the sparse
 // precision the reference's builder would choose. Every normal
 // precision from one below the minimum to one above the maximum is

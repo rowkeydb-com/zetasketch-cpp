@@ -88,6 +88,15 @@ cc_test(
 )
 
 cc_test(
+    name = "sparse_buffer_test",
+    srcs = ["sparse_buffer_test.cpp"],
+    deps = [
+        "//:zetasketch-cpp",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "sparse_representation_test",
     srcs = ["sparse_representation_test.cpp"],
     deps = [

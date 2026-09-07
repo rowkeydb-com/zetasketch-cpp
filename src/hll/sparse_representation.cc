@@ -10,6 +10,7 @@
 #include <expected>
 #include <format>
 #include <optional>
+#include <span>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -30,9 +31,7 @@ SparseRepresentation::SparseRepresentation(State state,
     : state_(std::move(state)),
       encoding_(std::move(encoding)),
       max_sparse_data_bytes_(max_sparse_data_bytes),
-      max_buffer_elements_(max_buffer_elements) {
-  buffer_.reserve(max_buffer_elements_ + 1);
-}
+      max_buffer_elements_(max_buffer_elements) {}
 
 std::expected<SparseRepresentation, utils::Error> SparseRepresentation::Create(
     State state) {
@@ -82,95 +81,183 @@ std::expected<void, utils::Error> SparseRepresentation::CheckPrecision(
   return {};
 }
 
-std::expected<void, utils::Error> SparseRepresentation::SortAndDedupBuffer() {
-  if (buffer_.empty()) {
-    return {};
-  }
+namespace {
 
-  std::ranges::sort(buffer_);
-
-  std::vector<uint32_t> deduped;
-  deduped.reserve(buffer_.size());
-  std::optional<uint32_t> last_value;
-
-  for (const uint32_t value : buffer_) {
-    if (!last_value.has_value() || value != last_value.value()) {
-      const uint32_t index = encoding_.DecodeSparseIndex(value);
-      if (!deduped.empty() &&
-          encoding_.DecodeSparseIndex(deduped.back()) == index) {
-        deduped.back() = value;
-      } else {
-        deduped.push_back(value);
-      }
-      last_value = value;
-    }
-  }
-
-  buffer_ = std::move(deduped);
-  return {};
+// The stored stream of a state as a span, empty where there is none.
+std::span<const uint8_t> StoredStream(const State& state) {
+  if (!state.sparse_data.has_value()) return {};
+  return std::span<const uint8_t>(*state.sparse_data);
 }
 
-std::expected<void, utils::Error> SparseRepresentation::FlushBuffer() {
-  if (buffer_.empty()) {
-    return {};
+// Yields a stored stream and a sorted buffer as one increasing
+// sequence, the stream's value first on a tie, as the reference's
+// sortedIterator does.
+//
+// The stream is decoded one value ahead, and that decoding happens at
+// the moment the value before it is handed out, which is when the
+// reference's merged iterator decodes it too. A value that does not
+// decode therefore ends the sequence exactly where the reference
+// throws: the value in hand is dropped, nothing after it is yielded, and
+// error() holds the failure. What either library has written by then is
+// the same, so the refusal each reports is the same kind.
+class SortedValues {
+ public:
+  SortedValues(std::span<const uint8_t> stored,
+               std::span<const uint32_t> buffered)
+      : decoder_(stored), buffered_(buffered) {
+    stream_next_ = decoder_.Next();
   }
 
-  auto sort_res = SortAndDedupBuffer();
-  if (!sort_res.has_value()) return std::unexpected(sort_res.error());
-
-  utils::DifferenceEncoder encoder(std::move(scratch_sparse_data_));
-  int32_t new_sparse_size = 0;
-  if (!state_.sparse_data.has_value() || state_.sparse_data->empty()) {
-    for (const uint32_t val : buffer_) {
-      auto put_res = encoder.PutInt(static_cast<int32_t>(val));
-      if (!put_res.has_value()) return std::unexpected(put_res.error());
-      new_sparse_size++;
+  [[nodiscard]] std::optional<uint32_t> Next() {
+    if (decoder_.error().has_value()) return std::nullopt;
+    const bool buffer_remains = buffered_index_ < buffered_.size();
+    if (stream_next_.has_value() &&
+        (!buffer_remains ||
+         stream_next_.value() <= buffered_[buffered_index_])) {
+      const uint32_t value = stream_next_.value();
+      stream_next_ = decoder_.Next();
+      if (decoder_.error().has_value()) return std::nullopt;
+      return value;
     }
-  } else {
-    utils::DifferenceDecoder decoder(*state_.sparse_data);
-    const utils::DifferenceDecoderIterator dec_iter(&decoder);
-    const utils::DifferenceDecoderIterator dec_end;
+    if (buffer_remains) return buffered_[buffered_index_++];
+    return std::nullopt;
+  }
 
-    utils::MergedIntIterator<utils::DifferenceDecoderIterator,
-                             std::vector<uint32_t>::const_iterator>
-        merged_iter(dec_iter, dec_end, buffer_.begin(), buffer_.end());
+  // Holds the stream's decode failure once the sequence has ended on one.
+  [[nodiscard]] const std::optional<utils::Error>& error() const {
+    return decoder_.error();
+  }
 
-    std::optional<uint32_t> last_index = std::nullopt;
-    std::optional<uint32_t> last_val = std::nullopt;
-    while (auto val = merged_iter.Next()) {
-      const uint32_t idx = encoding_.DecodeSparseIndex(val.value());
-      if (last_index.has_value() && last_index.value() == idx) {
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-        last_val = std::max(last_val.value(), val.value());
-      } else {
-        if (last_val.has_value()) {
-          auto put_res = encoder.PutInt(static_cast<int32_t>(last_val.value()));
-          if (!put_res.has_value()) return std::unexpected(put_res.error());
-          new_sparse_size++;
-        }
-        last_index = idx;
-        last_val = val;
+ private:
+  utils::DifferenceDecoder decoder_;
+  std::span<const uint32_t> buffered_;
+  size_t buffered_index_ = 0;
+  std::optional<uint32_t> stream_next_;
+};
+
+// Yields two sorted sequences as one, the smaller head first and the
+// first sequence's on a tie, as the reference's MergedIntIterator does
+// when it merges two representations of one encoding. Each sequence is
+// read one value ahead, as above, so a decode failure in either ends
+// this sequence where the reference's outer iterator would have thrown:
+// when the value before the one in hand was handed out.
+class MergedSequences {
+ public:
+  MergedSequences(SortedValues* first, SortedValues* second)
+      : first_(first), second_(second) {
+    first_next_ = first_->Next();
+    second_next_ = second_->Next();
+  }
+
+  [[nodiscard]] std::optional<uint32_t> Next() {
+    if (error().has_value()) return std::nullopt;
+    if (second_next_.has_value() &&
+        (!first_next_.has_value() || second_next_ < first_next_)) {
+      const uint32_t value = second_next_.value();
+      second_next_ = second_->Next();
+      if (second_->error().has_value()) return std::nullopt;
+      return value;
+    }
+    if (first_next_.has_value()) {
+      const uint32_t value = first_next_.value();
+      first_next_ = first_->Next();
+      if (first_->error().has_value()) return std::nullopt;
+      return value;
+    }
+    return std::nullopt;
+  }
+
+  // Holds a decode failure of either stream once the sequence has ended
+  // on one, the first sequence's ahead of the second's.
+  [[nodiscard]] const std::optional<utils::Error>& error() const {
+    return first_->error().has_value() ? first_->error() : second_->error();
+  }
+
+ private:
+  SortedValues* first_;
+  SortedValues* second_;
+  std::optional<uint32_t> first_next_;
+  std::optional<uint32_t> second_next_;
+};
+
+// Writes a sorted sequence of values deduplicated in one pass, as the
+// reference's dedupe does, and returns how many were written. A value
+// without an encoded rho is its own sparse index, and only an exact
+// repeat of it is dropped. A value with one opens a run of every value
+// after it with the same sparse index, and the last of the run is
+// written. The two rules are not one rule: a value without an encoded
+// rho never joins the run before it, whatever its index, so a stream can
+// hold a value beside another of the same index. That happens only with
+// values a downgrade carried across at their old precision, and the
+// reference writes both, so this library must too. Nor is any part of
+// the sequence deduplicated on its own first: a stored value can fall
+// between two buffered values of one index, and the reference, which
+// sees the merged sequence, keeps both of them.
+//
+// A stream that stops decoding ends the sequence at the value the
+// reference would have been handing out when it met the bad bytes; that
+// value is dropped and the failure is reported. The values written
+// before it were written by the reference too, and one of those may have
+// been refused by the encoder first, in both libraries alike.
+template <typename Sequence>
+std::expected<int32_t, utils::Error> WriteDeduplicated(
+    const encoding::Sparse& encoding, Sequence& values,
+    utils::DifferenceEncoder& encoder) {
+  int32_t written = 0;
+  std::optional<uint32_t> next = values.Next();
+  while (next.has_value()) {
+    uint32_t value = next.value();
+    if (encoding.HasEncodedRhoW(value)) {
+      const uint32_t index = encoding.DecodeSparseIndex(value);
+      next = values.Next();
+      while (next.has_value() &&
+             encoding.DecodeSparseIndex(next.value()) == index) {
+        value = next.value();
+        next = values.Next();
+      }
+    } else {
+      next = values.Next();
+      while (next.has_value() && next.value() == value) {
+        next = values.Next();
       }
     }
-    if (decoder.error().has_value()) {
-      return std::unexpected(decoder.error().value());
+    if (!next.has_value() && values.error().has_value()) {
+      return std::unexpected(values.error().value());
     }
-    if (last_val.has_value()) {
-      auto put_res = encoder.PutInt(static_cast<int32_t>(last_val.value()));
-      if (!put_res.has_value()) return std::unexpected(put_res.error());
-      new_sparse_size++;
-    }
+    auto put_res = encoder.PutInt(static_cast<int32_t>(value));
+    if (!put_res.has_value()) return std::unexpected(put_res.error());
+    written++;
   }
+  if (values.error().has_value()) {
+    return std::unexpected(values.error().value());
+  }
+  return written;
+}
 
-  scratch_sparse_data_ = std::move(encoder).IntoVec();
+}  // namespace
+
+void SparseRepresentation::SetStream(std::vector<uint8_t> stream,
+                                     int32_t size) {
+  scratch_sparse_data_ = std::move(stream);
   if (state_.sparse_data.has_value()) {
     std::swap(state_.sparse_data.value(), scratch_sparse_data_);
     scratch_sparse_data_.clear();
   } else {
     state_.sparse_data = std::move(scratch_sparse_data_);
   }
-  state_.sparse_size = new_sparse_size;
+  state_.sparse_size = size;
   buffer_.clear();
+}
+
+std::expected<void, utils::Error> SparseRepresentation::FlushBuffer() {
+  if (buffer_.empty()) {
+    return {};
+  }
+  SortedValues values(StoredStream(state_), buffer_.Sorted());
+  utils::DifferenceEncoder encoder(std::move(scratch_sparse_data_));
+  auto written = WriteDeduplicated(encoding_, values, encoder);
+  if (!written.has_value()) return std::unexpected(written.error());
+  SetStream(std::move(encoder).IntoVec(), written.value());
   return {};
 }
 
@@ -231,10 +318,12 @@ SparseRepresentation::Normalize() && {
     }
   }
 
-  for (const uint32_t val : buffer_) {
-    auto add_res = normal_repr.AddSparseValue(encoding_, val);
-    if (!add_res.has_value()) return std::unexpected(add_res.error());
-  }
+  std::expected<void, utils::Error> added;
+  buffer_.ForEach([&normal_repr, &added, this](uint32_t value) {
+    added = normal_repr.AddSparseValue(encoding_, value);
+    return added.has_value();
+  });
+  if (!added.has_value()) return std::unexpected(added.error());
 
   return normal_repr;
 }
@@ -242,8 +331,7 @@ SparseRepresentation::Normalize() && {
 // NOLINTNEXTLINE(misc-no-recursion)
 std::expected<Representation, utils::Error> SparseRepresentation::AddHash(
     uint64_t hash) && {
-  const uint32_t encoded_val = encoding_.Encode(hash);
-  buffer_.push_back(encoded_val);
+  buffer_.Insert(encoding_.Encode(hash));
   return std::move(*this).UpdateRepresentation();
 }
 
@@ -287,8 +375,7 @@ SparseRepresentation::Downgrade(  // NOLINT(misc-no-recursion)
       std::min(encoding_.sparse_precision(), target.sparse_precision());
 
   const encoding::Sparse source_encoding = encoding_;
-  std::vector<uint32_t> buffered;
-  buffered.swap(buffer_);
+  SparseBuffer buffered = std::exchange(buffer_, SparseBuffer());
 
   auto lowered = SparseRepresentation::Create(std::move(state_));
   if (!lowered.has_value()) return std::unexpected(lowered.error());
@@ -311,8 +398,7 @@ SparseRepresentation::Downgrade(  // NOLINT(misc-no-recursion)
   // The reference carries the buffer across through the target encoding
   // without lowering the values, its buffer iterator yielding them as
   // they stand, and in sorted order.
-  std::ranges::sort(buffered);
-  for (const uint32_t value : buffered) {
+  for (const uint32_t value : buffered.Sorted()) {
     auto added = AddSparseValueToRepresentation(std::move(representation),
                                                 target, value);
     if (!added.has_value()) return std::unexpected(added.error());
@@ -338,7 +424,7 @@ SparseRepresentation::AddSparseValue(  // NOLINT(misc-no-recursion)
                                           source_sparse_encoding, sparse_value);
   }
 
-  buffer_.push_back(
+  buffer_.Insert(
       encoding_.IsLessThan(source_sparse_encoding)
           ? source_sparse_encoding.DowngradeSparseValue(sparse_value, encoding_)
           : sparse_value);
@@ -385,16 +471,17 @@ std::expected<void, utils::Error> SparseRepresentation::MergeInto(
     }
   }
 
-  for (const uint32_t value : buffer_) {
-    auto added = target.AddSparseValue(encoding_, value);
-    if (!added.has_value()) return added;
-  }
-  return {};
+  std::expected<void, utils::Error> added;
+  buffer_.ForEach([&target, &added, this](uint32_t value) {
+    added = target.AddSparseValue(encoding_, value);
+    return added.has_value();
+  });
+  return added;
 }
 
 std::expected<Representation, utils::Error>
 SparseRepresentation::MergeFromSparse(  // NOLINT(misc-no-recursion)
-    const SparseRepresentation& other) && {
+    SparseRepresentation& other) && {
   const encoding::Sparse& source = other.encoding();
   auto compatible = encoding_.AssertCompatible(source);
   if (!compatible.has_value()) {
@@ -415,51 +502,55 @@ SparseRepresentation::MergeFromSparse(  // NOLINT(misc-no-recursion)
     representation = std::move(lowered.value());
   }
 
-  // Where the encodings have become equal, the reference merges the two
-  // sorted streams, deduplicates the result, and updates the
-  // representation once rather than once per value. The bytes are the
-  // same either way; the number of updates is not, and an update is
-  // what promotes a sparse sketch to a dense one. Adding value by value
-  // here would leave the sketch sparse where the reference has already
-  // promoted it, and estimate it differently until the next write.
-  auto* sparse = std::get_if<SparseRepresentation>(&representation);
-  const bool encodings_are_equal =
-      sparse != nullptr && !sparse->encoding_.IsLessThan(source);
+  // Only now does the reference look at the operand, and one holding
+  // nothing leaves this representation as the lowering left it: no
+  // flush, no update. Flushing here would move values out of the buffer
+  // that the reference still holds unflushed, and a later downgrade
+  // would then carry different values across.
+  if (StoredStream(other.state_).empty() && other.buffer_.empty()) {
+    return representation;
+  }
 
-  if (other.state_.sparse_data.has_value() &&
-      !other.state_.sparse_data->empty()) {
-    utils::DifferenceDecoder decoder(*other.state_.sparse_data);
-    while (auto value = decoder.Next()) {
-      if (encodings_are_equal) {
-        sparse->buffer_.push_back(value.value());
-        continue;
-      }
+  // The operand's values arrive in increasing order, its stored stream
+  // and its buffer merged, as the reference's sortedIterator yields
+  // them: a stored stream in the order it decodes, not sorted again.
+  SortedValues theirs(StoredStream(other.state_), other.buffer_.Sorted());
+
+  // Where this representation is the lower one, each value is lowered
+  // and added on its own, and may flush the buffer or promote the
+  // representation, so the order the values arrive in is the order the
+  // reference must see too.
+  auto* sparse = std::get_if<SparseRepresentation>(&representation);
+  if (sparse == nullptr || sparse->encoding_.IsLessThan(source)) {
+    while (auto value = theirs.Next()) {
       auto added = AddSparseValueToRepresentation(std::move(representation),
                                                   source, value.value());
       if (!added.has_value()) return std::unexpected(added.error());
       representation = std::move(added.value());
     }
-    if (decoder.error().has_value()) {
-      return std::unexpected(decoder.error().value());
+    if (theirs.error().has_value()) {
+      return std::unexpected(theirs.error().value());
     }
-  }
-
-  for (const uint32_t value : other.buffer_) {
-    if (encodings_are_equal) {
-      sparse->buffer_.push_back(value);
-      continue;
-    }
-    auto added = AddSparseValueToRepresentation(std::move(representation),
-                                                source, value);
-    if (!added.has_value()) return std::unexpected(added.error());
-    representation = std::move(added.value());
-  }
-
-  if (!encodings_are_equal) {
     return representation;
   }
-  auto flushed = sparse->FlushBuffer();
-  if (!flushed.has_value()) return std::unexpected(flushed.error());
+
+  // Where the encodings have become equal, the reference merges the two
+  // sides' sorted sequences, writes the result deduplicated as one
+  // stream, and updates the representation once rather than once per
+  // value. The bytes are the same either way; the number of updates is
+  // not, and an update is what promotes a sparse sketch to a dense one.
+  // Adding value by value here would leave the sketch sparse where the
+  // reference has already promoted it, and estimate it differently
+  // until the next write. Nor may the operand's stream pass through the
+  // buffer: a stream read from bytes need not increase, and the
+  // reference refuses such a stream when it writes the merged sequence,
+  // where a buffer would have sorted it into acceptance.
+  SortedValues mine(StoredStream(sparse->state_), sparse->buffer_.Sorted());
+  MergedSequences values(&mine, &theirs);
+  utils::DifferenceEncoder encoder(std::move(sparse->scratch_sparse_data_));
+  auto written = WriteDeduplicated(sparse->encoding_, values, encoder);
+  if (!written.has_value()) return std::unexpected(written.error());
+  sparse->SetStream(std::move(encoder).IntoVec(), written.value());
   return std::move(*sparse).UpdateRepresentation();
 }
 

@@ -36,6 +36,7 @@ cc_library(
         "include/zetasketch/hll/encoding.h",
         "include/zetasketch/hll/math_utils.h",
         "include/zetasketch/hll/normal_representation.h",
+        "include/zetasketch/hll/sparse_buffer.h",
         "include/zetasketch/hll/sparse_representation.h",
         "include/zetasketch/hyperloglogplusplus.h",
     ],

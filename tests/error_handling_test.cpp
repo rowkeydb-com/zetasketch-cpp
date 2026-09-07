@@ -2302,86 +2302,424 @@ TEST(ErrorHandlingTest, ValidateAcceptsAnyRegisterValue) {
   }
 }
 
-// Every merge across sparse precisions at one normal precision, with
-// populations that leave values unflushed on either side, additions
-// after the merge, then a write and a read back. This is the shape
-// that carries values across a downgrade and leaves them mis-encoded,
-// as the reference does. Every sketch written must pass the walk, and
-// a write may fail only in the one shape where the reference throws.
-TEST(ErrorHandlingTest, ValidateAcceptsEveryMergeAcrossSparsePrecisions) {
-  constexpr std::array<int, 3> kPopulations = {0, 3, 40};
-  int refused = 0;
-  for (int32_t np = HyperLogLogPlusPlus::kMinimumPrecision; np <= 12; ++np) {
-    const std::array<int32_t, 6> sparse_precisions = {
-        HyperLogLogPlusPlus::kSparsePrecisionDisabled,
-        np,
-        np + 1,
-        np + 2,
-        np + 5,
-        HyperLogLogPlusPlus::kMaximumSparsePrecision};
-    for (const int32_t receiver_sp : sparse_precisions) {
-      for (const int32_t operand_sp : sparse_precisions) {
-        for (const int receiver_population : kPopulations) {
-          for (const int operand_population : kPopulations) {
-            const std::string context = std::format(
-                "np={} receiver sp={} x{} operand sp={} x{}", np, receiver_sp,
-                receiver_population, operand_sp, operand_population);
-            auto receiver = HyperLogLogPlusPlus::Create(np, receiver_sp);
-            auto operand = HyperLogLogPlusPlus::Create(np, operand_sp);
-            ASSERT_TRUE(receiver.has_value() && operand.has_value()) << context;
-            for (int i = 0; i < receiver_population; ++i) {
-              ASSERT_TRUE(receiver->Add(std::format("r{}", i)).has_value());
-            }
-            for (int i = 0; i < operand_population; ++i) {
-              ASSERT_TRUE(operand->Add(std::format("o{}", i)).has_value());
-            }
-            // A merge or a write may be refused only where the reference
-            // itself throws: values carried across a downgrade and then
-            // promoted under the lower precision name registers outside
-            // the array. That takes a sparse receiver holding unflushed
-            // values and a sparse operand at a lower precision.
-            const bool reference_throws_here =
-                receiver_sp > operand_sp &&
-                operand_sp != HyperLogLogPlusPlus::kSparsePrecisionDisabled &&
-                receiver_population > 0;
-            const auto refused_as_the_reference_does =
-                [&](const zetasketch::utils::Error& error) {
-                  ++refused;
-                  EXPECT_TRUE(reference_throws_here)
-                      << context << ": " << error.message;
-                  EXPECT_EQ(error.code,
-                            zetasketch::utils::ErrorCode::kInvalidState)
-                      << context;
-                };
-            auto merged = receiver->Merge(std::move(*operand));
-            if (!merged.has_value()) {
-              refused_as_the_reference_does(merged.error());
-              continue;
-            }
-            for (const std::string_view value : {"x", "y", "z"}) {
-              ASSERT_TRUE(receiver->Add(value).has_value()) << context;
-            }
-            auto bytes = receiver->Serialize();
-            if (!bytes.has_value()) {
-              refused_as_the_reference_does(bytes.error());
-              continue;
-            }
-            auto reread = HyperLogLogPlusPlus::FromBytes(*bytes);
-            ASSERT_TRUE(reread.has_value()) << context;
-            auto valid = reread->Validate();
-            EXPECT_TRUE(valid.has_value())
-                << context
-                << (valid.has_value() ? "" : ": " + valid.error().message);
-          }
-        }
-      }
+// The reference holds its unflushed values in a set, so a value added
+// twice is held once, and at normal precision 7 the buffer is flushed
+// at the thirty-third distinct value rather than the thirty-third
+// addition. Which values are left in the buffer is visible only through
+// a downgrade, which carries the buffer across as it is: the forty
+// strings below encode to thirty-eight distinct values at sparse
+// precision 8, and to thirty-nine at 9, so a buffer that counted
+// repeats flushed early and carried the wrong values across, and the
+// sketch written after the merge held them mis-encoded. The bytes, the
+// estimates and the bytes after three more additions are the
+// reference's own for the same operations.
+TEST(ErrorHandlingTest, TheBufferCountsDistinctValuesAsTheReferenceDoes) {
+  struct Carry {
+    int32_t receiver_sparse_precision;
+    int operand_population;
+    const char* merged_hex;
+    int64_t merged_estimate;
+    const char* extended_hex;
+  };
+  const std::vector<Carry> carries = {
+      {.receiver_sparse_precision = 8,
+       .operand_population = 0,
+       .merged_hex =
+           "087010281802200b820742102518072007323a29b00112d63ec202be03418005"
+           "80014041ff028002408202bd01800342be0242fe05800380038004423f81027e"
+           "41403f8002c20181033ec1043e",
+       .merged_estimate = 44,
+       .extended_hex =
+           "0870102b1802200b820746102818072007323e29b00112d63e810241be0341c0"
+           "03c00180014041ff028002408202bd01c0024042be0242fe0580038003800442"
+           "3f81027e41403f8002c20181033ec1043e"},
+      {.receiver_sparse_precision = 9,
+       .operand_population = 40,
+       .merged_hex =
+           "087010501802200b82075a103c1807200732525267f90124eb3c8001c2013fff"
+           "02414082043e443c4041ff028002407f8101bf04423e433d800142be01c00441"
+           "bf0241ff0140800141c002413f7f82017e41403f82017e4082017e404183013d"
+           "7f8003423e",
+       .merged_estimate = 81,
+       .extended_hex =
+           "087010531802200b82075e103f1807200732565267f90124eb3c80018101413f"
+           "ff024140800382013e443c4041ff028002407f8101ff0340423e433d800142be"
+           "01c00441bf0241ff0140800141c002413f7f82017e41403f82017e4082017e40"
+           "4183013d7f8003423e"},
+  };
+  for (const Carry& carry : carries) {
+    auto receiver =
+        HyperLogLogPlusPlus::Create(7, carry.receiver_sparse_precision);
+    auto operand = HyperLogLogPlusPlus::Create(7, 7);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    for (int i = 0; i < 40; ++i) {
+      ASSERT_TRUE(receiver->Add(std::format("r{}", i)).has_value());
     }
+    for (int i = 0; i < carry.operand_population; ++i) {
+      ASSERT_TRUE(operand->Add(std::format("o{}", i)).has_value());
+    }
+    ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+    EXPECT_EQ(SerializedHex(*receiver), carry.merged_hex)
+        << carry.receiver_sparse_precision;
+    EXPECT_EQ(receiver->Result().value_or(-1), carry.merged_estimate)
+        << carry.receiver_sparse_precision;
+    for (const std::string_view value : {"x", "y", "z"}) {
+      ASSERT_TRUE(receiver->Add(value).has_value());
+    }
+    EXPECT_EQ(SerializedHex(*receiver), carry.extended_hex)
+        << carry.receiver_sparse_precision;
   }
-  // The reference throws in exactly this many of the 2916 states, and
-  // this library refuses the same ones. The shape guard above admits
-  // 540 states, so the count is what keeps a refusal the reference
-  // does not make from passing unnoticed.
-  EXPECT_EQ(refused, 36);
+}
+
+// The reference deduplicates a flush in one pass over the merged
+// sequence of its stored and buffered values, under two rules: a value
+// without an encoded rho is its own index and is dropped only for an
+// exact repeat of itself, while a value with one closes over every
+// value after it of the same index. Under a single encoding no two
+// values differ in kind and share an index, so the rules agree; values
+// a downgrade carried across at their old precision are where they
+// part. Both sequences build a receiver at (4, 5), whose buffer flushes
+// at the fifth distinct value, and merge an empty operand at (4, 4).
+// The strings are named for their encodings at (4, 5).
+//
+// In the first, five values flush: four with normal indices 0 to 2, and
+// one encoded as the unflagged 5. Then the unflagged 3 and the flagged
+// 1217, both of index 3 under (4, 4), stay buffered and are carried
+// across. The reference writes 3 and 1217 both, with the re-encoded
+// stored values between them; a buffer deduplicated on its own before
+// the merge would have dropped 3 for 1217.
+//
+// In the second, five values of indices 3 and above flush, one of them
+// index 3, and the unflagged 3 alone stays buffered. The reference
+// writes 3 beside 1218, the re-encoded value of index 3, where one
+// rule over indices would have kept 1218 alone. The bytes and the
+// estimates, after the merge and after three more additions, are the
+// reference's own.
+TEST(ErrorHandlingTest, TheFlushDeduplicatesAsTheReferenceDoes) {
+  struct Sequence {
+    std::vector<std::string_view> values;
+    const char* merged_hex;
+    int64_t merged_estimate;
+    const char* extended_hex;
+    int64_t extended_estimate;
+  };
+  const std::vector<Sequence> sequences = {
+      {.values = {"v13", "v17", "v28", "v29", "v24", "v62", "v5"},
+       .merged_hex = "087010071802200b82070e100518042004320603ff07413f3f",
+       .merged_estimate = 6,
+       .extended_hex = "0870100a1802200b820710100618042004320803ff07413f3fc101",
+       .extended_estimate = 8},
+      {.values = {"v0", "v1", "v2", "v3", "v5", "v62"},
+       .merged_hex = "087010061802200b820711100618042004320903bf09c1023e86013a",
+       .merged_estimate = 8,
+       .extended_hex =
+           "087010091802200b820716180420042a100100013f000002000301000701000000",
+       .extended_estimate = 11},
+  };
+  for (const Sequence& sequence : sequences) {
+    auto receiver = HyperLogLogPlusPlus::Create(4, 5);
+    auto operand = HyperLogLogPlusPlus::Create(4, 4);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    for (const std::string_view value : sequence.values) {
+      ASSERT_TRUE(receiver->Add(value).has_value());
+    }
+    ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+    EXPECT_EQ(SerializedHex(*receiver), sequence.merged_hex);
+    EXPECT_TRUE(receiver->Validate().has_value());
+    EXPECT_EQ(receiver->Result().value_or(-1), sequence.merged_estimate);
+    for (const std::string_view value : {"x", "y", "z"}) {
+      ASSERT_TRUE(receiver->Add(value).has_value());
+    }
+    EXPECT_EQ(SerializedHex(*receiver), sequence.extended_hex);
+    EXPECT_EQ(receiver->Result().value_or(-1), sequence.extended_estimate);
+  }
+}
+
+// The reference lowers itself to a lower-precision operand before it
+// looks at the operand's values, and then, finding none, does nothing
+// more: no flush, no update. So a receiver whose buffer is full enough
+// to flush stays unflushed and sparse across an empty merge, and its
+// estimate is the sparse one where a flush would have promoted it to
+// the dense one; and the values still buffered are what a later
+// downgrade carries across. Each estimate and each sketch here is the
+// reference's own.
+TEST(ErrorHandlingTest, MergingAnEmptyOperandLeavesTheReceiverUnflushed) {
+  struct Unflushed {
+    int32_t sparse_precision;
+    int population;
+    int64_t estimate;
+    const char* written_hex;
+  };
+  // At normal precision 4 the buffer flushes at the fifth distinct
+  // value and the stream promotes at twelve bytes; each population
+  // below leaves the receiver one flush short of promotion, which the
+  // write then performs.
+  const std::vector<Unflushed> unflushed = {
+      {.sparse_precision = 4,
+       .population = 9,
+       .estimate = 11,
+       .written_hex = "087010091802200b820716180420042a10010100020100010200000"
+                      "20000000001"},
+      {.sparse_precision = 6,
+       .population = 13,
+       .estimate = 15,
+       .written_hex = "0870100d1802200b820716180420062a10030100020100010200000"
+                      "20002000101"},
+      {.sparse_precision = 25,
+       .population = 4,
+       .estimate = 4,
+       .written_hex = "087010041802200b820716180420192a10000000020100010000000"
+                      "20000000000"},
+  };
+  for (const Unflushed& state : unflushed) {
+    auto receiver = HyperLogLogPlusPlus::Create(4, state.sparse_precision);
+    auto operand = HyperLogLogPlusPlus::Create(4, state.sparse_precision);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    for (int i = 0; i < state.population; ++i) {
+      ASSERT_TRUE(receiver->Add(std::format("r{}", i)).has_value());
+    }
+    ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+    EXPECT_EQ(receiver->Result().value_or(-1), state.estimate)
+        << state.sparse_precision;
+    EXPECT_EQ(SerializedHex(*receiver), state.written_hex)
+        << state.sparse_precision;
+  }
+
+  // Forty strings at (7, 9) leave seven unflushed. An empty merge at
+  // the same precisions must leave them so, for the empty merge at
+  // (7, 7) after it to carry them across; a flush in between would
+  // have re-encoded them and written a different sketch.
+  auto receiver = HyperLogLogPlusPlus::Create(7, 9);
+  auto same = HyperLogLogPlusPlus::Create(7, 9);
+  auto lower = HyperLogLogPlusPlus::Create(7, 7);
+  ASSERT_TRUE(receiver.has_value() && same.has_value() && lower.has_value());
+  for (int i = 0; i < 40; ++i) {
+    ASSERT_TRUE(receiver->Add(std::format("r{}", i)).has_value());
+  }
+  ASSERT_TRUE(receiver->Merge(std::move(*same)).has_value());
+  ASSERT_TRUE(receiver->Merge(std::move(*lower)).has_value());
+  EXPECT_EQ(SerializedHex(*receiver),
+            "087010281802200b82074110251807200732395267f90124eb3cc202be034180"
+            "0580014041ff028002408002bf0442be0242fe05800380038004423f81027e41"
+            "403f8002c20180033fc1043e");
+  EXPECT_EQ(receiver->Result().value_or(-1), 44);
+}
+
+// A stream read from bytes need not increase; reading accepts it and
+// only Validate refuses it. The reference takes such a stream as it
+// decodes, and refuses it where it comes to write the values in order:
+// at a merge that writes the merged sequence, and at a flush after an
+// addition. Where the operand is lowered value by value into a
+// lower-precision receiver, the reference sorts the values into
+// acceptance, and so must this library. An estimate flushes nothing
+// when nothing is buffered, so the stream is estimated and written
+// back as it stands. The verdicts and bytes are the reference's own for
+// a (4, 6) stream holding 5 then 3.
+TEST(ErrorHandlingTest,
+     AStreamThatDoesNotIncreaseIsRefusedWhereTheReferenceRefusesIt) {
+  using zetasketch::utils::ErrorCode;
+  const std::vector<uint8_t> five_then_three = {0x05, 0xfe, 0xff,
+                                                0xff, 0xff, 0x0f};
+  const auto operand = [&five_then_three]() {
+    return SparseSketchOf(4, 6, 2, five_then_three);
+  };
+
+  struct Receiver {
+    int32_t sparse_precision;
+    int population;
+    bool refused;
+  };
+  const std::vector<Receiver> receivers = {
+      {.sparse_precision = 6, .population = 1, .refused = true},
+      {.sparse_precision = 6, .population = 0, .refused = true},
+      {.sparse_precision = 9, .population = 1, .refused = true},
+      {.sparse_precision = 4, .population = 1, .refused = false},
+  };
+  for (const Receiver& shape : receivers) {
+    auto receiver = HyperLogLogPlusPlus::Create(4, shape.sparse_precision);
+    auto stream = operand();
+    ASSERT_TRUE(receiver.has_value() && stream.has_value());
+    for (int i = 0; i < shape.population; ++i) {
+      ASSERT_TRUE(receiver->Add(std::format("r{}", i)).has_value());
+    }
+    auto merged = receiver->Merge(std::move(*stream));
+    EXPECT_EQ(merged.has_value(), !shape.refused) << shape.sparse_precision;
+    if (!merged.has_value()) {
+      EXPECT_EQ(merged.error().code, ErrorCode::kIllegalArgument)
+          << shape.sparse_precision;
+      continue;
+    }
+    EXPECT_EQ(SerializedHex(*receiver),
+              "087010011802200b82070d1003180420043205810841bf02");
+    EXPECT_EQ(receiver->Result().value_or(-1), 3);
+  }
+
+  auto added_to = operand();
+  ASSERT_TRUE(added_to.has_value());
+  ASSERT_TRUE(added_to->Add("r0").has_value());
+  auto written = added_to->Serialize();
+  ASSERT_FALSE(written.has_value());
+  EXPECT_EQ(written.error().code, ErrorCode::kIllegalArgument);
+
+  auto untouched = operand();
+  ASSERT_TRUE(untouched.has_value());
+  EXPECT_EQ(untouched->Result().value_or(-1), 2);
+  EXPECT_EQ(SerializedHex(*untouched),
+            "08701000180282070e100218042006320605feffffff0f");
+
+  // The same stream as the receiver. A live operand at the same
+  // precisions is refused where the merged sequence is written; an empty
+  // operand at the same or a higher sparse precision leaves the stream
+  // as it is; an empty operand at a lower one lowers the receiver,
+  // which re-encodes the stream value by value and so sorts it into
+  // acceptance. Estimating flushes nothing when nothing is buffered.
+  auto with_live_operand = operand();
+  auto live = HyperLogLogPlusPlus::Create(4, 6);
+  ASSERT_TRUE(with_live_operand.has_value() && live.has_value());
+  ASSERT_TRUE(live->Add("o0").has_value());
+  auto merged = with_live_operand->Merge(std::move(*live));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_EQ(merged.error().code, ErrorCode::kIllegalArgument);
+
+  struct EmptyOperand {
+    int32_t sparse_precision;
+    const char* written_hex;
+  };
+  const std::vector<EmptyOperand> empty_operands = {
+      {.sparse_precision = 6,
+       .written_hex = "08701000180282070e100218042006320605feffffff0f"},
+      {.sparse_precision = 9,
+       .written_hex = "08701000180282070e100218042006320605feffffff0f"},
+      {.sparse_precision = 4,
+       .written_hex = "08701000180282070b1002180420043203810841"},
+  };
+  for (const EmptyOperand& empty_operand : empty_operands) {
+    auto receiver = operand();
+    auto empty = HyperLogLogPlusPlus::Create(4, empty_operand.sparse_precision);
+    ASSERT_TRUE(receiver.has_value() && empty.has_value());
+    ASSERT_TRUE(receiver->Merge(std::move(*empty)).has_value())
+        << empty_operand.sparse_precision;
+    EXPECT_EQ(receiver->Result().value_or(-1), 2)
+        << empty_operand.sparse_precision;
+    EXPECT_EQ(SerializedHex(*receiver), empty_operand.written_hex)
+        << empty_operand.sparse_precision;
+  }
+}
+
+// Where a stream stops decoding, the reference throws at the moment its
+// merged iterator decodes the bad bytes, which is when it hands out the
+// value before them: nothing from that value on is written, and a value
+// written before it may have been refused by the encoder first. This
+// library reports the same kind of refusal in every case, a decode
+// failure or an encoder refusal, as measured against the reference.
+//
+// The streams, all read from bytes and never validated: one at (4, 6)
+// holding 5, 3, 7; one at (4, 6) holding 2 and then a byte that
+// continues a varint past the end; one at (4, 6) holding 9, 5, 3 and
+// then such a byte; the last of those at (5, 7); and one at (4, 6)
+// holding 5, 3.
+TEST(ErrorHandlingTest, ADecodeFailureIsReportedWhereTheReferenceMeetsIt) {
+  using zetasketch::utils::Error;
+  using zetasketch::utils::ErrorCode;
+  const std::vector<uint8_t> five_three_seven = {0x05, 0xfe, 0xff, 0xff,
+                                                 0xff, 0x0f, 0x04};
+  const std::vector<uint8_t> two_then_cut = {0x02, 0x80};
+  const std::vector<uint8_t> nine_five_three_then_cut = {
+      0x09, 0xfc, 0xff, 0xff, 0xff, 0x0f, 0xfe, 0xff, 0xff, 0xff, 0x0f, 0x80};
+  const std::vector<uint8_t> five_three = {0x05, 0xfe, 0xff, 0xff, 0xff, 0x0f};
+
+  const auto decode_failure = [](const Error& error) {
+    return error.code == ErrorCode::kInvalidState &&
+           error.message == "Varint continues past the end of the buffer";
+  };
+  const auto encoder_refusal = [](const Error& error) {
+    return error.code == ErrorCode::kIllegalArgument &&
+           error.message.contains("put after");
+  };
+
+  enum class Refusal : uint8_t { kDecodeFailure, kEncoderRefusal };
+  struct Pairing {
+    const char* description;
+    int32_t receiver_size;
+    const std::vector<uint8_t>* receiver_stream;
+    int32_t operand_size;
+    const std::vector<uint8_t>* operand_stream;
+    Refusal refusal;
+  };
+  const std::vector<Pairing> pairings = {
+      {.description = "5, 3, 7 taking 2 then cut",
+       .receiver_size = 3,
+       .receiver_stream = &five_three_seven,
+       .operand_size = 2,
+       .operand_stream = &two_then_cut,
+       .refusal = Refusal::kDecodeFailure},
+      {.description = "2 then cut taking 5, 3, 7",
+       .receiver_size = 2,
+       .receiver_stream = &two_then_cut,
+       .operand_size = 3,
+       .operand_stream = &five_three_seven,
+       .refusal = Refusal::kDecodeFailure},
+      {.description = "5, 3, 7 taking 9, 5, 3 then cut",
+       .receiver_size = 3,
+       .receiver_stream = &five_three_seven,
+       .operand_size = 4,
+       .operand_stream = &nine_five_three_then_cut,
+       .refusal = Refusal::kEncoderRefusal},
+      {.description = "2 then cut taking 5, 3",
+       .receiver_size = 2,
+       .receiver_stream = &two_then_cut,
+       .operand_size = 2,
+       .operand_stream = &five_three,
+       .refusal = Refusal::kDecodeFailure},
+  };
+  for (const Pairing& pairing : pairings) {
+    auto receiver =
+        SparseSketchOf(4, 6, pairing.receiver_size, *pairing.receiver_stream);
+    auto operand =
+        SparseSketchOf(4, 6, pairing.operand_size, *pairing.operand_stream);
+    ASSERT_TRUE(receiver.has_value() && operand.has_value());
+    auto merged = receiver->Merge(std::move(*operand));
+    ASSERT_FALSE(merged.has_value()) << pairing.description;
+    EXPECT_TRUE(pairing.refusal == Refusal::kDecodeFailure
+                    ? decode_failure(merged.error())
+                    : encoder_refusal(merged.error()))
+        << pairing.description << ": " << merged.error().message;
+  }
+
+  // A live receiver taking the cut stream, and the cut stream taking a
+  // live operand: the decode failure both times.
+  auto live_receiver = HyperLogLogPlusPlus::Create(4, 6);
+  auto cut_operand = SparseSketchOf(4, 6, 4, nine_five_three_then_cut);
+  ASSERT_TRUE(live_receiver.has_value() && cut_operand.has_value());
+  ASSERT_TRUE(live_receiver->Add("r0").has_value());
+  auto merged = live_receiver->Merge(std::move(*cut_operand));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_TRUE(decode_failure(merged.error())) << merged.error().message;
+
+  auto cut_receiver = SparseSketchOf(4, 6, 4, nine_five_three_then_cut);
+  auto live_operand = HyperLogLogPlusPlus::Create(4, 6);
+  ASSERT_TRUE(cut_receiver.has_value() && live_operand.has_value());
+  ASSERT_TRUE(live_operand->Add("o0").has_value());
+  merged = cut_receiver->Merge(std::move(*live_operand));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_TRUE(decode_failure(merged.error())) << merged.error().message;
+
+  // The flush after an addition meets the cut before it meets the
+  // value that does not increase. An estimate with nothing buffered
+  // flushes nothing, so it counts the recorded size and the write
+  // returns the bytes as they were.
+  auto added_to = SparseSketchOf(5, 7, 4, nine_five_three_then_cut);
+  ASSERT_TRUE(added_to.has_value());
+  ASSERT_TRUE(added_to->Add("r0").has_value());
+  auto written = added_to->Serialize();
+  ASSERT_FALSE(written.has_value());
+  EXPECT_TRUE(decode_failure(written.error())) << written.error().message;
+
+  auto untouched = SparseSketchOf(5, 7, 4, nine_five_three_then_cut);
+  ASSERT_TRUE(untouched.has_value());
+  EXPECT_EQ(untouched->Result().value_or(-1), 4);
+  EXPECT_EQ(SerializedHex(*untouched),
+            "087010001802820714100418052007320c09fcffffff0ffeffffff0f80");
 }
 
 // The reference's downgrade re-encodes a sketch's stored stream for the

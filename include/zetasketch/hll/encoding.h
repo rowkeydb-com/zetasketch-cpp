@@ -212,6 +212,13 @@ class Sparse {
            static_cast<uint32_t>(sparse_rho_w);
   }
 
+  // Whether the value carries its rho explicitly, which is the case
+  // when the sparse index alone could not have determined it. A value
+  // without it is the sparse index itself.
+  [[nodiscard]] bool HasEncodedRhoW(uint32_t sparse_value) const {
+    return (sparse_value & rho_encoded_flag_) != 0;
+  }
+
   [[nodiscard]] uint32_t DecodeSparseIndex(uint32_t sparse_value) const {
     if ((sparse_value & rho_encoded_flag_) == 0) {
       return sparse_value;

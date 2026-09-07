@@ -12,6 +12,7 @@
 #include <vector>
 #include "zetasketch/hll/encoding.h"
 #include "zetasketch/hll/normal_representation.h"
+#include "zetasketch/hll/sparse_buffer.h"
 #include "zetasketch/hll/state.h"
 #include "zetasketch/utils/error.h"
 
@@ -58,14 +59,20 @@ class SparseRepresentation {
 
   // Lowers this representation to the given encoding, as the
   // reference's downgrade does, re-encoding the stored stream through
-  // the target encoding and carrying the buffer across unchanged. It
-  // returns this representation unaltered when the target is not lower.
+  // the target encoding and carrying the buffer across unchanged, in
+  // increasing order. Which values are still in the buffer is decided
+  // by the flushes before, and those fall where the reference's do
+  // because the buffer counts distinct values as the reference's does.
+  // It returns this representation unaltered when the target is not
+  // lower.
   [[nodiscard]] std::expected<Representation, utils::Error> Downgrade(
       const encoding::Sparse& target) &&;
 
-  // Merges another sparse representation into this one.
+  // Merges another sparse representation into this one, taking its
+  // values in increasing order as the reference does. The operand's
+  // buffer is arranged for that, which is why it is not const.
   [[nodiscard]] std::expected<Representation, utils::Error> MergeFromSparse(
-      const SparseRepresentation& other) &&;
+      SparseRepresentation& other) &&;
 
   // Compacts the sparse representation.
   [[nodiscard]] std::expected<Representation, utils::Error> Compact() &&;
@@ -82,8 +89,13 @@ class SparseRepresentation {
                        size_t max_sparse_data_bytes,
                        size_t max_buffer_elements);
 
+  // Writes the stored stream and the buffer as one deduplicated stream,
+  // as the reference's flushBuffer does, and empties the buffer.
   [[nodiscard]] std::expected<void, utils::Error> FlushBuffer();
-  [[nodiscard]] std::expected<void, utils::Error> SortAndDedupBuffer();
+
+  // Replaces the stored stream with one just written, records how many
+  // values it holds, and empties the buffer, as the reference's set does.
+  void SetStream(std::vector<uint8_t> stream, int32_t size);
 
   [[nodiscard]] std::expected<Representation, utils::Error>
   UpdateRepresentation() &&;
@@ -92,7 +104,7 @@ class SparseRepresentation {
   encoding::Sparse encoding_;
   size_t max_sparse_data_bytes_;
   size_t max_buffer_elements_;
-  std::vector<uint32_t> buffer_;
+  SparseBuffer buffer_;
   std::vector<uint8_t> scratch_sparse_data_;
 };
 
