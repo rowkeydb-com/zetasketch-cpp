@@ -1,9 +1,12 @@
 #include <stdlib.h>
 #include <unistd.h>
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -15,6 +18,8 @@
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <random>
+#include <system_error>
 #include <sys/types.h>
 // NOLINTNEXTLINE(misc-include-cleaner)
 #include <fstream>
@@ -41,8 +46,12 @@ namespace {
 
 using zetasketch::HyperLogLogPlusPlus;
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables,fuchsia-statically-constructed-objects)
-std::string g_java_cli;
+// The path of the reference harness, given as --java_cli= on the
+// command line.
+std::string& JavaCliFlag() {
+  static std::string path;
+  return path;
+}
 
 // The child reads its input from a file created from this template.
 // The path is fixed rather than taken from the environment, reading
@@ -81,7 +90,7 @@ uint8_t ParseHexByte(std::string_view hex_byte) {
 // a fixed mode, precision and sparse precision.
 std::string RunJavaWithArguments(const std::vector<std::string>& arguments,
                                  const std::string& input_data) {
-  if (g_java_cli.empty()) {
+  if (JavaCliFlag().empty()) {
     ADD_FAILURE() << "JAVA_CLI path is empty";
     return "";
   }
@@ -115,7 +124,7 @@ std::string RunJavaWithArguments(const std::vector<std::string>& arguments,
   // strings own the storage the pointers refer to.
   std::vector<std::string> owned_arguments;
   owned_arguments.reserve(arguments.size() + 1);
-  owned_arguments.push_back(g_java_cli);
+  owned_arguments.push_back(JavaCliFlag());
   for (const std::string& argument : arguments) {
     owned_arguments.push_back(argument);
   }
@@ -151,7 +160,7 @@ std::string RunJavaWithArguments(const std::vector<std::string>& arguments,
     if (dup2(outpipefd[1], STDOUT_FILENO) == -1) _exit(1);
     close(outpipefd[1]);
 
-    execv(g_java_cli.c_str(), argv.data());
+    execv(JavaCliFlag().c_str(), argv.data());
     std::cerr << "execv failed: " << errno << "\n";
     _exit(1);
   }
@@ -2120,11 +2129,11 @@ SweepOutcome CppSweepBlock(int32_t np, int32_t receiver_sp,
 }
 
 // Cuts a block's lines after the first refusal and reduces that line to
-// the fact of the refusal. Where the reference throws, its aggregator
-// is left as the exception found it, which the reference does not
-// define, so what follows is not compared; and the two libraries word
-// a refusal differently, the reference naming the array index it ran
-// past and this library the state it found.
+// the fact of the refusal. Nothing after a refusal is compared: after a
+// throw that interrupts a merge part way the reference's state is not
+// defined. The wording is not compared either; it is the same in both
+// libraries for a refusal of incompatible precisions or kinds, and
+// differs where the reference reports an index out of bounds.
 std::vector<std::string> UpToFirstRefusal(std::vector<std::string> lines) {
   for (size_t i = 0; i < lines.size(); ++i) {
     if (lines[i].starts_with("ERROR")) {
@@ -2327,6 +2336,763 @@ TEST(ReferenceLibraryTest,
   }
 }
 
+// The bounded guarantee. A sequence is a receiver configuration, an
+// operand (its configuration and the steps that build it) and the
+// steps performed on the receiver. Every addition, the building of the
+// operand, the merge itself, every write and every estimate is one
+// block of the reference's script, under its own mark, so that a
+// refusal is located to the very addition or operation it happened at.
+// The two libraries are compared block by block up to and including
+// the first block in which the reference refused; after a throw that
+// interrupts a merge part way the reference's state is not defined, so
+// nothing after that block is compared. This library's remaining blocks
+// are still performed, uncompared, since it must not fault whatever went
+// before.
+struct Step {
+  enum class Kind : uint8_t {
+    kAddStrings,
+    kAddLongs,
+    kMerge,
+    kWrite,
+    kEstimate
+  };
+  Kind kind;
+  int count = 0;
+};
+
+// A sketch's precisions and the kind of value it is built for, which
+// decides the kinds of addition it admits.
+struct Configuration {
+  int32_t np = 0;
+  int32_t sp = 0;
+  Step::Kind kind = Step::Kind::kAddStrings;
+};
+
+struct Operand {
+  Configuration configuration;
+  std::vector<Step> prelude;
+};
+
+struct Sequence {
+  Configuration receiver;
+  Operand operand;
+  std::vector<Step> steps;
+};
+
+// The receiver's values are the strings s0, s1, ... and the longs 0,
+// 1, ...; the operand's are o0, o1, ... and 1000, 1001, .... A step
+// adding one value always adds the first, so repeated single additions
+// repeat a value, which is what the distinct-value buffer is about; a
+// step adding more begins where no earlier step of the same side
+// reached, so the population grows with every such step and can
+// promote the sketch. The operand's values never coincide with the
+// receiver's.
+constexpr int64_t kOperandLongBase = 1000;
+
+int FirstValueOf(const std::vector<Step>& steps, size_t position) {
+  if (steps[position].count == 1) return 0;
+  int first = 0;
+  for (size_t k = 0; k < position; ++k) {
+    if (steps[k].count > 1) first += steps[k].count;
+  }
+  return first;
+}
+
+std::string Describe(const Step& step) {
+  switch (step.kind) {
+    case Step::Kind::kAddStrings:
+      return std::format("S{}", step.count);
+    case Step::Kind::kAddLongs:
+      return std::format("L{}", step.count);
+    case Step::Kind::kMerge:
+      return "M";
+    case Step::Kind::kWrite:
+      return "W";
+    case Step::Kind::kEstimate:
+      return "E";
+  }
+  return "?";
+}
+
+std::string Describe(const std::vector<Step>& steps) {
+  std::string text;
+  for (const Step& step : steps) {
+    text += (text.empty() ? "" : " ") + Describe(step);
+  }
+  return text;
+}
+
+// The word the harness builds a sketch of the kind with, and the value
+// type this library builds it with.
+std::string_view TypeWord(Step::Kind kind) {
+  return kind == Step::Kind::kAddLongs ? "longs" : "strings";
+}
+
+zetasketch::hll::ValueType TypeOf(Step::Kind kind) {
+  return kind == Step::Kind::kAddLongs
+             ? zetasketch::hll::ValueType::kUnsignedInt64
+             : zetasketch::hll::ValueType::kBytesOrUtf8String;
+}
+
+bool Merges(const Sequence& sequence) {
+  return std::ranges::any_of(sequence.steps, [](const Step& step) {
+    return step.kind == Step::Kind::kMerge;
+  });
+}
+
+std::string Describe(const Sequence& sequence) {
+  std::string text =
+      std::format("receiver {} ({}, {})", TypeWord(sequence.receiver.kind),
+                  sequence.receiver.np, sequence.receiver.sp);
+  if (Merges(sequence)) {
+    text += std::format("; operand {} ({}, {}) [{}]",
+                        TypeWord(sequence.operand.configuration.kind),
+                        sequence.operand.configuration.np,
+                        sequence.operand.configuration.sp,
+                        Describe(sequence.operand.prelude));
+  }
+  return text + "; steps: " + Describe(sequence.steps);
+}
+
+// One block of a sequence: what the reference's script says under its
+// mark, and what this library does for it.
+struct Block {
+  enum class Action : uint8_t {
+    kAddString,
+    kAddLong,
+    kBuildOperand,
+    kMerge,
+    kWrite,
+    kEstimate
+  };
+  std::string name;
+  Action action;
+  std::string value;
+  int64_t number = 0;
+};
+
+std::string OperandScript(const Sequence& sequence) {
+  const Operand& operand = sequence.operand;
+  std::string script =
+      std::format("OPERAND {} {} {}\n", TypeWord(operand.configuration.kind),
+                  operand.configuration.np, operand.configuration.sp);
+  for (size_t p = 0; p < operand.prelude.size(); ++p) {
+    const Step& step = operand.prelude[p];
+    const int first = FirstValueOf(operand.prelude, p);
+    switch (step.kind) {
+      case Step::Kind::kAddStrings:
+        for (int i = 0; i < step.count; ++i) {
+          script += std::format("OPERAND_ADD_STRING {}\n",
+                                EncodeBase64(std::format("o{}", first + i)));
+        }
+        break;
+      case Step::Kind::kAddLongs:
+        for (int i = 0; i < step.count; ++i) {
+          script += std::format("OPERAND_ADD_LONG {}\n",
+                                kOperandLongBase + first + i);
+        }
+        break;
+      case Step::Kind::kWrite:
+        script += "OPERAND_CHECKPOINT\n";
+        break;
+      case Step::Kind::kMerge:
+      case Step::Kind::kEstimate:
+        ADD_FAILURE() << "an operand is built by additions and writes";
+        break;
+    }
+  }
+  return script;
+}
+
+// The blocks of a sequence, in order: "<index>/0" builds the receiver,
+// "<index>/<step>.<n>" is the n-th addition of an adding step,
+// "<index>/<step>.operand" builds the operand for a merging step and
+// "<index>/<step>" is the merge, write or estimate itself.
+std::vector<Block> BlocksOf(const Sequence& sequence, size_t index) {
+  std::vector<Block> blocks;
+  for (size_t k = 0; k < sequence.steps.size(); ++k) {
+    const Step& step = sequence.steps[k];
+    const std::string prefix = std::format("{}/{}", index, k + 1);
+    const int first = FirstValueOf(sequence.steps, k);
+    switch (step.kind) {
+      case Step::Kind::kAddStrings:
+        for (int i = 0; i < step.count; ++i) {
+          blocks.push_back({.name = std::format("{}.{}", prefix, i + 1),
+                            .action = Block::Action::kAddString,
+                            .value = std::format("s{}", first + i),
+                            .number = 0});
+        }
+        break;
+      case Step::Kind::kAddLongs:
+        for (int i = 0; i < step.count; ++i) {
+          blocks.push_back({.name = std::format("{}.{}", prefix, i + 1),
+                            .action = Block::Action::kAddLong,
+                            .value = {},
+                            .number = first + i});
+        }
+        break;
+      case Step::Kind::kMerge:
+        blocks.push_back({.name = prefix + ".operand",
+                          .action = Block::Action::kBuildOperand,
+                          .value = {},
+                          .number = 0});
+        blocks.push_back({.name = prefix,
+                          .action = Block::Action::kMerge,
+                          .value = {},
+                          .number = 0});
+        break;
+      case Step::Kind::kWrite:
+        blocks.push_back({.name = prefix,
+                          .action = Block::Action::kWrite,
+                          .value = {},
+                          .number = 0});
+        break;
+      case Step::Kind::kEstimate:
+        blocks.push_back({.name = prefix,
+                          .action = Block::Action::kEstimate,
+                          .value = {},
+                          .number = 0});
+        break;
+    }
+  }
+  return blocks;
+}
+
+// The reference's script for one sequence.
+std::string ReferenceScript(const Sequence& sequence, size_t index,
+                            const std::vector<Block>& blocks) {
+  std::string script = std::format("MARK {}/0\nRECEIVER {} {} {}\n", index,
+                                   TypeWord(sequence.receiver.kind),
+                                   sequence.receiver.np, sequence.receiver.sp);
+  for (const Block& block : blocks) {
+    script += std::format("MARK {}\n", block.name);
+    switch (block.action) {
+      case Block::Action::kAddString:
+        script += std::format("ADD_STRING {}\n", EncodeBase64(block.value));
+        break;
+      case Block::Action::kAddLong:
+        script += std::format("ADD_LONG {}\n", block.number);
+        break;
+      case Block::Action::kBuildOperand:
+        script += OperandScript(sequence);
+        break;
+      case Block::Action::kMerge:
+        script += "MERGE_OPERAND\n";
+        break;
+      case Block::Action::kWrite:
+        script += "CHECKPOINT\n";
+        break;
+      case Block::Action::kEstimate:
+        script += "RESULT\n";
+        break;
+    }
+  }
+  return script;
+}
+
+// This library's side of one sequence: the receiver, and the operand
+// between its building and the merge.
+struct Performer {
+  HyperLogLogPlusPlus receiver;
+  std::optional<HyperLogLogPlusPlus> operand;
+};
+
+// Performs one block and returns the lines the reference prints for it.
+// A write also reads its bytes back and requires the sketch read to
+// pass the walk, estimate as the receiver does, and write the same
+// bytes again: FromBytes is in the grammar as the identity it must be.
+std::vector<std::string> Perform(Performer& performer, const Sequence& sequence,
+                                 const Block& block) {
+  std::vector<std::string> lines;
+  const auto refused = [&lines](const zetasketch::utils::Error& error) {
+    lines.push_back("ERROR " + error.message);
+  };
+  switch (block.action) {
+    case Block::Action::kAddString: {
+      auto added = performer.receiver.Add(block.value);
+      if (!added.has_value()) refused(added.error());
+      break;
+    }
+    case Block::Action::kAddLong: {
+      auto added = performer.receiver.Add(block.number);
+      if (!added.has_value()) refused(added.error());
+      break;
+    }
+    case Block::Action::kBuildOperand: {
+      const Operand& operand = sequence.operand;
+      auto built = HyperLogLogPlusPlus::Create(
+          operand.configuration.np, operand.configuration.sp,
+          TypeOf(operand.configuration.kind));
+      if (!built.has_value()) {
+        refused(built.error());
+        performer.operand.reset();
+        break;
+      }
+      for (size_t p = 0; p < operand.prelude.size(); ++p) {
+        const Step& step = operand.prelude[p];
+        const int first = FirstValueOf(operand.prelude, p);
+        switch (step.kind) {
+          case Step::Kind::kAddStrings:
+            for (int i = 0; i < step.count; ++i) {
+              auto added = built->Add(std::format("o{}", first + i));
+              if (!added.has_value()) refused(added.error());
+            }
+            break;
+          case Step::Kind::kAddLongs:
+            for (int i = 0; i < step.count; ++i) {
+              auto added = built->Add(kOperandLongBase + first + i);
+              if (!added.has_value()) refused(added.error());
+            }
+            break;
+          case Step::Kind::kWrite: {
+            auto bytes = built->Serialize();
+            if (bytes.has_value()) {
+              lines.push_back(PrintHex(*bytes));
+            } else {
+              refused(bytes.error());
+            }
+            break;
+          }
+          case Step::Kind::kMerge:
+          case Step::Kind::kEstimate:
+            break;
+        }
+      }
+      performer.operand = std::move(*built);
+      break;
+    }
+    case Block::Action::kMerge: {
+      if (!performer.operand.has_value()) {
+        ADD_FAILURE() << Describe(sequence) << ": a merge with no operand";
+        break;
+      }
+      auto merged = performer.receiver.Merge(std::move(*performer.operand));
+      performer.operand.reset();
+      if (!merged.has_value()) refused(merged.error());
+      break;
+    }
+    case Block::Action::kWrite: {
+      auto bytes = performer.receiver.Serialize();
+      if (!bytes.has_value()) {
+        refused(bytes.error());
+        break;
+      }
+      lines.push_back(PrintHex(*bytes));
+      auto reread = HyperLogLogPlusPlus::FromBytes(*bytes);
+      EXPECT_TRUE(reread.has_value()) << Describe(sequence);
+      if (!reread.has_value()) break;
+      auto valid = reread->Validate();
+      EXPECT_TRUE(valid.has_value())
+          << Describe(sequence)
+          << (valid.has_value() ? "" : ": " + valid.error().message);
+      auto estimate_read = reread->Result();
+      auto estimate_written = performer.receiver.Result();
+      EXPECT_TRUE(estimate_read.has_value() && estimate_written.has_value() &&
+                  *estimate_read == *estimate_written)
+          << Describe(sequence);
+      auto again = reread->Serialize();
+      EXPECT_TRUE(again.has_value() && *again == *bytes) << Describe(sequence);
+      break;
+    }
+    case Block::Action::kEstimate: {
+      auto result = performer.receiver.Result();
+      lines.push_back(result.has_value() ? std::to_string(*result)
+                                         : "ERROR " + result.error().message);
+      break;
+    }
+  }
+  return lines;
+}
+
+// A digest of the sequences, printed beside the seed, so that a replay
+// can be seen to have generated the same sequences and not only the
+// same count of refusals. FNV-1a over the descriptions; the standard
+// library's hash is not fixed across platforms, this is.
+uint64_t DigestOf(const std::vector<Sequence>& sequences) {
+  constexpr uint64_t kOffset = 0xcbf29ce484222325ULL;
+  constexpr uint64_t kPrime = 0x100000001b3ULL;
+  uint64_t digest = kOffset;
+  for (const Sequence& sequence : sequences) {
+    for (const char character : Describe(sequence) + "\n") {
+      digest ^= static_cast<uint8_t>(character);
+      digest *= kPrime;
+    }
+  }
+  return digest;
+}
+
+// Runs every sequence through the reference in one start and through
+// this library, and compares them block by block. Returns the indices
+// of the sequences in which the reference refused a block.
+std::vector<size_t> CompareWithTheReference(
+    const std::vector<Sequence>& sequences, std::string_view context) {
+  std::vector<std::vector<Block>> blocks_of;
+  blocks_of.reserve(sequences.size());
+  std::string script;
+  size_t blocks_expected = 0;
+  for (size_t index = 0; index < sequences.size(); ++index) {
+    blocks_of.push_back(BlocksOf(sequences[index], index));
+    script += ReferenceScript(sequences[index], index, blocks_of.back());
+    blocks_expected += blocks_of.back().size() + 1;
+  }
+  const auto blocks = SplitAtMarks(RunScriptWithReceivers(script));
+  std::vector<size_t> sequences_refused;
+  if (blocks.size() != blocks_expected) {
+    ADD_FAILURE() << context << ": the reference printed " << blocks.size()
+                  << " blocks where " << blocks_expected << " were expected";
+    return sequences_refused;
+  }
+
+  size_t block = 0;
+  for (size_t index = 0; index < sequences.size(); ++index) {
+    const Sequence& sequence = sequences[index];
+    const std::string description = Describe(sequence);
+    auto receiver =
+        HyperLogLogPlusPlus::Create(sequence.receiver.np, sequence.receiver.sp,
+                                    TypeOf(sequence.receiver.kind));
+    EXPECT_TRUE(receiver.has_value()) << description;
+    EXPECT_EQ(blocks[block].first, std::format("{}/0", index)) << description;
+    EXPECT_TRUE(blocks[block].second.empty())
+        << description << ": " << blocks[block].second.front();
+    ++block;
+    if (!receiver.has_value()) {
+      block += blocks_of[index].size();
+      continue;
+    }
+    Performer performer{.receiver = std::move(*receiver),
+                        .operand = std::nullopt};
+    bool refused = false;
+    for (const Block& expected_block : blocks_of[index]) {
+      const auto& [name, reference] = blocks[block++];
+      EXPECT_EQ(name, expected_block.name) << description;
+      const std::vector<std::string> mine =
+          UpToFirstRefusal(Perform(performer, sequence, expected_block));
+      if (refused) continue;
+      const std::vector<std::string> expected = UpToFirstRefusal(reference);
+      EXPECT_EQ(mine, expected)
+          << description << "; at block " << name << "; " << context;
+      if (!expected.empty() && expected.back() == "ERROR") {
+        refused = true;
+        sequences_refused.push_back(index);
+      }
+      if (mine != expected) refused = true;
+    }
+  }
+  return sequences_refused;
+}
+
+// Whether a sequence has one of the two shapes in which the reference
+// is known to throw. The first: two sparse configurations of which one
+// is higher in normal precision and lower in sparse precision, which
+// the reference's encodings declare incompatible; the check is made
+// only while the receiver is sparse, so a receiver promoted before the
+// merge is not refused. The second: a sparse receiver given values and
+// then a sparse operand at a lower sparse precision, whose unflushed
+// values the lowering carries across at their old precision, to be
+// promoted later under the new one outside the register array. Both
+// are necessary shapes, not sufficient ones: whether the receiver is
+// still sparse, and whether values are still unflushed, depend on the
+// counts.
+bool HasAKnownRefusalShape(const Sequence& sequence) {
+  const Configuration& receiver = sequence.receiver;
+  const Configuration& operand = sequence.operand.configuration;
+  if (!Merges(sequence) || receiver.sp == 0 || operand.sp == 0) return false;
+  if ((receiver.np < operand.np && receiver.sp > operand.sp) ||
+      (receiver.np > operand.np && receiver.sp < operand.sp)) {
+    return true;
+  }
+  if (operand.sp >= receiver.sp) return false;
+  for (const Step& step : sequence.steps) {
+    if (step.kind == Step::Kind::kMerge) return false;
+    if (step.kind == Step::Kind::kAddStrings ||
+        step.kind == Step::Kind::kAddLongs) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The exhaustive space. Every sequence of one to three steps over six
+// operations, for each kind of value, at every receiver configuration
+// and, where the sequence merges, every operand state. The operations:
+// add one value, add m/4 + 1 values, add 2m values (m being 2^np of the
+// sketch added to, so that the second count flushes the buffer and the
+// third promotes the sketch), merge, write,
+// estimate; the values all strings or all longs, on both sides, since a
+// sequence mixing the kinds is refused at its second kind by both
+// libraries, which the admitted-kinds matrix already compares in every
+// state. The receiver is at normal precision 4, 5 or 6 with sparse mode
+// disabled, at the normal precision, one above it, or at 25; the
+// operand at the receiver's normal precision or the next, with sparse
+// mode disabled, at its own normal precision, or at 25, holding
+// nothing, one value, m/4 + 1 values or 2m values. An operand written before
+// the merge is not a further state: the receiver reads the operand's buffer
+// whether flushed or not, and m/4 + 1 values have flushed it already; measured,
+// the receiver's bytes and estimates are the same. That is, for each kind, 12
+// receivers by 258 sequences, the 103 of which that merge taken at all 24
+// operand states: 31,524 sequences, 63,048 for both kinds.
+//
+// The operand is never at a lower normal precision than the receiver.
+// Merging one into a dense receiver lowers the receiver's state but
+// not the reference's own encoding of it, so the reference's later
+// additions index outside the array and throw, or land in the wrong
+// register, and a sketch written after those additions carries the
+// miscount. The merge itself writes correctly; the defect is in what
+// the reference's object does next, and it is not compared.
+constexpr size_t kExhaustiveSequences = 63048;
+
+std::vector<Sequence> EveryShortSequence() {
+  std::vector<Sequence> sequences;
+  constexpr int kLongestSequence = 3;
+  for (const Step::Kind kind :
+       {Step::Kind::kAddStrings, Step::Kind::kAddLongs}) {
+    for (const int32_t np : {4, 5, 6}) {
+      const int m = static_cast<int>(1U << static_cast<uint32_t>(np));
+      const int many = (m / 4) + 1;
+      const int promoting = 2 * m;
+      const std::array<Step, 6> alphabet = {{
+          {.kind = kind, .count = 1},
+          {.kind = kind, .count = many},
+          {.kind = kind, .count = promoting},
+          {.kind = Step::Kind::kMerge},
+          {.kind = Step::Kind::kWrite},
+          {.kind = Step::Kind::kEstimate},
+      }};
+      for (const int32_t sp : {0, np, np + 1, 25}) {
+        const Configuration receiver = {.np = np, .sp = sp, .kind = kind};
+        for (int length = 1; length <= kLongestSequence; ++length) {
+          std::vector<size_t> digits(static_cast<size_t>(length), 0);
+          while (true) {
+            std::vector<Step> steps;
+            steps.reserve(digits.size());
+            for (const size_t digit : digits)
+              steps.push_back(alphabet.at(digit));
+            const Sequence without_merge = {
+                .receiver = receiver,
+                .operand = {.configuration = receiver, .prelude = {}},
+                .steps = steps};
+            if (!Merges(without_merge)) {
+              sequences.push_back(without_merge);
+            } else {
+              for (const int32_t onp : {np, np + 1}) {
+                const int operand_m =
+                    static_cast<int>(1U << static_cast<uint32_t>(onp));
+                const std::array<std::vector<Step>, 4> preludes = {{
+                    {},
+                    {{.kind = kind, .count = 1}},
+                    {{.kind = kind, .count = (operand_m / 4) + 1}},
+                    {{.kind = kind, .count = 2 * operand_m}},
+                }};
+                for (const int32_t osp : {0, onp, 25}) {
+                  for (const std::vector<Step>& prelude : preludes) {
+                    sequences.push_back(
+                        {.receiver = receiver,
+                         .operand = {.configuration = {.np = onp,
+                                                       .sp = osp,
+                                                       .kind = kind},
+                                     .prelude = prelude},
+                         .steps = steps});
+                  }
+                }
+              }
+            }
+            // The next combination, counting in base six.
+            size_t position = 0;
+            while (position < digits.size() &&
+                   ++digits[position] == alphabet.size()) {
+              digits[position] = 0;
+              ++position;
+            }
+            if (position == digits.size()) break;
+          }
+        }
+      }
+    }
+  }
+  return sequences;
+}
+
+TEST(ReferenceLibraryTest, EveryShortSequenceMatchesTheReference) {
+  const std::vector<Sequence> sequences = EveryShortSequence();
+  ASSERT_EQ(sequences.size(), kExhaustiveSequences);
+  const std::vector<size_t> refused =
+      CompareWithTheReference(sequences, "exhaustive space");
+  // Every sequence the reference refuses has one of the two shapes it is
+  // known to throw in; a refusal of any other shape would be a third
+  // behaviour of the reference's that this library happened to share.
+  int unexplained = 0;
+  for (const size_t index : refused) {
+    if (!HasAKnownRefusalShape(sequences[index])) {
+      ++unexplained;
+      ADD_FAILURE() << "refused in a shape not known to throw: "
+                    << Describe(sequences[index]);
+    }
+  }
+  // The number the reference throws in: a change in it would be a
+  // change in the reference's behaviour or in the script the harness
+  // runs, since the comparison above already holds this library to the
+  // same sequences.
+  EXPECT_EQ(refused.size(), 1358U);
+  std::cout << "sequences compared: " << sequences.size()
+            << "; refused by the reference at some block: " << refused.size()
+            << "; of an unknown shape: " << unexplained << "\n";
+  ::testing::Test::RecordProperty("sequences",
+                                  static_cast<int>(sequences.size()));
+  ::testing::Test::RecordProperty("refused", static_cast<int>(refused.size()));
+}
+
+// The exhaustive space's claim that its largest addition, 2m values,
+// promotes the sketch at every receiver configuration and for both
+// kinds: after that one step the written sketch holds a register array.
+TEST(ReferenceLibraryTest, ThePromotingAdditionPromotesAtEveryConfiguration) {
+  for (const Step::Kind kind :
+       {Step::Kind::kAddStrings, Step::Kind::kAddLongs}) {
+    for (const int32_t np : {4, 5, 6}) {
+      const int promoting =
+          2 * static_cast<int>(1U << static_cast<uint32_t>(np));
+      for (const int32_t sp : {0, np, np + 1, 25}) {
+        const Sequence sequence = {
+            .receiver = {.np = np, .sp = sp, .kind = kind},
+            .operand = {},
+            .steps = {{.kind = kind, .count = promoting}}};
+        auto receiver = HyperLogLogPlusPlus::Create(np, sp, TypeOf(kind));
+        ASSERT_TRUE(receiver.has_value());
+        Performer performer{.receiver = std::move(*receiver),
+                            .operand = std::nullopt};
+        for (const Block& block : BlocksOf(sequence, 0)) {
+          EXPECT_TRUE(Perform(performer, sequence, block).empty())
+              << Describe(sequence);
+        }
+        auto bytes = performer.receiver.Serialize();
+        ASSERT_TRUE(bytes.has_value()) << Describe(sequence);
+        auto state = zetasketch::hll::State::Parse(*bytes);
+        ASSERT_TRUE(state.has_value()) << Describe(sequence);
+        EXPECT_TRUE(state->data.has_value() && !state->data->empty())
+            << Describe(sequence) << " is still sparse";
+      }
+    }
+  }
+}
+
+// The random space. A fresh sample of longer sequences on every run,
+// over the whole range of normal precisions, with additions of up to m
+// values, which promote the sketch at every precision. The seed is
+// taken from --seed= when given, otherwise from the clock, and is
+// printed first with a digest of the sequences it produced, so that any
+// failure can be replayed exactly with --seed=<value> and the replay
+// seen to be the same sample. The generator draws from std::mt19937_64
+// alone, whose output the standard fixes, so a seed replays the same
+// sequences on every platform.
+std::optional<uint64_t>& SeedFlag() {
+  static std::optional<uint64_t> seed;
+  return seed;
+}
+
+constexpr int32_t kLowestNormal = 4;
+constexpr int32_t kHighestNormal = 12;
+constexpr int32_t kHighestSparse = 25;
+constexpr size_t kLongestRandomSequence = 12;
+constexpr size_t kRandomSequences = 600;
+
+std::vector<Sequence> RandomSequences(uint64_t seed, size_t count) {
+  std::mt19937_64 engine(seed);
+  const auto pick = [&engine](size_t choices) {
+    return static_cast<size_t>(engine() % choices);
+  };
+
+  const auto sparse_for = [&pick](int32_t np) -> int32_t {
+    if (pick(2) == 0) return 0;
+    return np + static_cast<int32_t>(pick(static_cast<size_t>(kHighestSparse) -
+                                          static_cast<size_t>(np) + 1));
+  };
+  // One value, three, the count that flushes the buffer, or, one time in
+  // eight, 2m values, which promote the sketch at any sparse precision.
+  const auto count_for = [&pick](int32_t np) {
+    const int m = static_cast<int>(1U << static_cast<uint32_t>(np));
+    if (pick(8) == 0) return 2 * m;
+    const std::array<int, 3> counts = {1, 3, (m / 4) + 1};
+    return counts.at(pick(counts.size()));
+  };
+  const auto other_kind = [](Step::Kind kind) {
+    return kind == Step::Kind::kAddStrings ? Step::Kind::kAddLongs
+                                           : Step::Kind::kAddStrings;
+  };
+
+  std::vector<Sequence> sequences;
+  sequences.reserve(count);
+  for (size_t n = 0; n < count; ++n) {
+    Sequence sequence;
+    const auto np = static_cast<int32_t>(
+        kLowestNormal + pick(static_cast<size_t>(kHighestNormal) -
+                             static_cast<size_t>(kLowestNormal) + 1));
+    // One sequence in four is drawn to mix the kinds of value: its operand is
+    // built for the other kind, and each of its additions may be of
+    // either kind. Both libraries refuse the crossing, at the merge or
+    // at the addition, and the refusal is compared like any other.
+    const bool mixed = pick(4) == 0;
+    const Step::Kind kind =
+        pick(2) == 0 ? Step::Kind::kAddStrings : Step::Kind::kAddLongs;
+    sequence.receiver = {.np = np, .sp = sparse_for(np), .kind = kind};
+    // At the receiver's normal precision or the next, never lower, for
+    // the reason given at EveryShortSequence.
+    const int32_t onp = np + static_cast<int32_t>(pick(2));
+    const Step::Kind operand_kind = mixed ? other_kind(kind) : kind;
+    sequence.operand.configuration = {
+        .np = onp, .sp = sparse_for(onp), .kind = operand_kind};
+    const size_t prelude_length = pick(3);
+    for (size_t k = 0; k < prelude_length; ++k) {
+      if (pick(4) == 0) {
+        sequence.operand.prelude.push_back({.kind = Step::Kind::kWrite});
+      } else {
+        sequence.operand.prelude.push_back(
+            {.kind = operand_kind, .count = count_for(onp)});
+      }
+    }
+    const size_t length = 1 + pick(kLongestRandomSequence);
+    for (size_t k = 0; k < length; ++k) {
+      switch (pick(5)) {
+        case 0:
+        case 1:
+          sequence.steps.push_back(
+              {.kind = mixed && pick(2) == 0 ? other_kind(kind) : kind,
+               .count = count_for(np)});
+          break;
+        case 2:
+          sequence.steps.push_back({.kind = Step::Kind::kMerge});
+          break;
+        case 3:
+          sequence.steps.push_back({.kind = Step::Kind::kWrite});
+          break;
+        default:
+          sequence.steps.push_back({.kind = Step::Kind::kEstimate});
+          break;
+      }
+    }
+    sequences.push_back(std::move(sequence));
+  }
+  return sequences;
+}
+
+TEST(ReferenceLibraryTest, RandomSequencesMatchTheReference) {
+  const uint64_t seed = SeedFlag().value_or(static_cast<uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count()));
+  const std::vector<Sequence> sequences =
+      RandomSequences(seed, kRandomSequences);
+  ASSERT_EQ(sequences.size(), kRandomSequences);
+  const uint64_t digest = DigestOf(sequences);
+  std::cout << std::format(
+      "seed={} digest={:016x} (replay with --test_arg=--seed={})\n", seed,
+      digest, seed);
+  ::testing::Test::RecordProperty("seed", std::to_string(seed));
+  ::testing::Test::RecordProperty("digest", std::format("{:016x}", digest));
+  const std::vector<size_t> refused = CompareWithTheReference(
+      sequences, std::format("random space, seed {}", seed));
+  std::cout << "sequences compared: " << sequences.size()
+            << "; refused by the reference at some block: " << refused.size()
+            << "\n";
+  ::testing::Test::RecordProperty("refused", static_cast<int>(refused.size()));
+}
+
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
@@ -2335,16 +3101,26 @@ int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
 
   constexpr std::string_view kFlag = "--java_cli=";
+  constexpr std::string_view kSeedFlag = "--seed=";
 
   const std::span<char*> args_span(argv, argc);
   for (size_t i = 1; i < args_span.size(); ++i) {
     const std::string_view arg = args_span[i];
     if (arg.starts_with(kFlag)) {
-      g_java_cli = arg.substr(kFlag.length());
+      JavaCliFlag() = arg.substr(kFlag.length());
+    } else if (arg.starts_with(kSeedFlag)) {
+      const std::string_view digits = arg.substr(kSeedFlag.length());
+      uint64_t seed = 0;
+      const auto parsed = std::from_chars(digits.begin(), digits.end(), seed);
+      if (parsed.ec != std::errc() || parsed.ptr != digits.end()) {
+        std::cerr << "Error: --seed= takes an unsigned integer\n";
+        return 1;
+      }
+      SeedFlag() = seed;
     }
   }
 
-  if (g_java_cli.empty()) {
+  if (JavaCliFlag().empty()) {
     std::cerr << "Error: --java_cli= flag is required\n";
     return 1;
   }

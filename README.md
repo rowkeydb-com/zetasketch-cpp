@@ -43,6 +43,8 @@ and a dynamic differential fuzzer.
     and integer values, processes it through both the C++ implementation
     and the Java ZetaSketch reference, and asserts strict serialization
     parity. The values are not random, so any failure reproduces exactly.
+    It also holds the bounded guarantee described below: an exhaustive
+    space of short operation sequences and a seeded random space.
     On the text path it executes 72 distinct `CREATE` operations and 54
     distinct `MERGE` operations, yielding a further 288 intermediate
     sketches; on the integer path a further 49 `CREATE` operations, one of
@@ -140,6 +142,103 @@ following C++ API methods against the Java equivalents:
 *   `HyperLogLogPlusPlus::Serialize()`
 *   `HyperLogLogPlusPlus::Result()` (Cardinality estimation parity verified in
     `golden_corpus_test.cpp`).
+
+#### The bounded guarantee
+
+Two implementations cannot be proved equal by testing; what is stated
+is a bound, and it is checked on every run. Over the operations add
+one value, add m/4 + 1 values, add 2m values (m being 2^p of the
+sketch added to; the second count is one more than the buffer holds
+before it flushes, and flushes it except where two of the values
+share an encoding, which can happen at a sparse precision within
+one of the normal precision; the third promotes the sketch to its
+dense form at every configuration below, which a test checks), merge,
+write, and estimate, with the values all strings or all longs, every
+sequence of one to three operations is performed by both libraries
+and compared at every write, every estimate and every refusal. The
+receiver is at normal precision 4, 5 or 6 with sparse mode disabled,
+at the normal precision, one above it, or at 25; the operand at the
+same or the next normal precision, with sparse mode disabled, at
+its own normal precision, or at 25, holding nothing, one value, m/4
++ 1 values or 2m values. That is 63,048 sequences. Every addition
+is its own step, so a refusal is located to the very addition it
+happened at; the wording of a refusal is not compared. It is the
+same in both libraries for the incompatible-precision refusals,
+and differs in the 44 carried-value refusals, where the reference
+reports an index out of bounds, naming the index in four of them
+and nothing in the rest. Every write is also read back, and the
+sketch read must pass the walk, estimate as the writer does, and
+write the same bytes again. Compared are the bytes of every write
+and the estimate of every estimate and, where the reference throws,
+that this library refuses at the same step. The reference throws in
+1,358 of the sequences, every one of a shape it is known to throw in:
+a pair of sparse configurations it declares incompatible, one higher
+in normal precision and lower in sparse precision, checked only while
+the receiver is sparse (1,314 of them, all at the merge); or unflushed
+values carried across a lowering to a lower sparse precision (44,
+at the merge or at an addition after it). Nothing after a refusal
+is compared, on either side. After an incompatible-precision or
+cross-kind refusal both libraries leave the receiver as it was,
+which is tested in `error_handling_test.cpp`; after a throw that
+interrupts a merge part way, the reference's state is not defined.
+This library's remaining steps are still performed, and its writes
+must still read back, walk and rewrite.
+
+On top of that, every continuous-integration test job draws a seed
+from the clock and compares 600 random sequences of up to twelve
+operations over normal precisions 4 to 12, with additions of one,
+three, m/4 + 1 or 2m values; 2m values promoted the sketch in every
+case measured: at every precision and sparse precision from the first
+300 starting values, at every reachable starting value at precisions
+4 to 8, and at sampled ones at 9 to 12. One sequence in four is
+drawn to allow the kinds of value to cross, and about one in five
+does, which both libraries refuse; the two sides' sparse precisions
+are drawn independently; so about a quarter of the sequences meet a
+refusal before their last step and are compared up to it. The seed
+and a digest of the sequences it produced are printed into the job's
+log, so a failure replays exactly with `--test_arg=--seed=<value>`
+and the replay can be seen to be the same sample. Every job of a run,
+and every re-run, draws its own seed; the CI script passes it as a
+test argument, which also keeps Bazel from serving a cached verdict.
+Locally, Bazel returns a cached result for unchanged inputs; a new
+sample needs a new seed or `--nocache_test_results`.
+
+What may be claimed from these tests, in full:
+
+For every sequence of one to three operations drawn from add one
+value, add m/4 + 1 values, add 2m values, merge, write and estimate,
+with the values all strings or all longs, at the receiver and operand
+configurations named above, this library and Google's Java ZetaSketch
+give the same bytes at every write and the same estimates at every
+estimate, up to the first refusal, and where the reference throws,
+this library refuses at the same step; the wording of a refusal is not
+compared. There are 63,048 such sequences; every continuous-integration
+test job compares all of them, and every one has agreed in every job,
+on x86_64 and on arm64. Nothing after a refusal is compared.
+
+Beyond that set, every continuous-integration test job draws a seed
+from the clock, prints it in its log with a digest of the sample,
+and compares 600 further random sequences of up to twelve operations
+at normal precisions 4 to 12. A disagreement at any compared step
+fails the run, and the seed replays the sample exactly. Each green
+job therefore records in its log a seed and a digest from which its
+600 draws, a few of which may repeat, replay exactly, and on which
+every compared step agreed; about a quarter of them are compared
+only up to a refusal both libraries make. What grows with every job
+is the number of sequences on which agreement has been observed.
+Nothing is claimed about sequences that have not been compared, and
+no probability of agreement on them is claimed.
+
+One shape is left out of both spaces: an operand at a lower normal
+precision than the receiver, in either representation. The reason
+is the dense receiver: that merge lowers the reference's state but
+not its own encoding of it, so its later additions index outside the
+register array and throw, or land in the wrong register and miscount,
+and a sketch written after those additions carries the miscount. The
+merge itself writes correctly. This library lowers both together and
+continues correctly, which is tested in `error_handling_test.cpp`; the
+sparse receiver's case is the ordinary lowering, compared elsewhere
+in the differential tests as a single merge.
 
 ### 4. State Machine Cartesian Product Coverage
 The `HyperLogLog++` architecture transitions between `SparseRepresentation` and

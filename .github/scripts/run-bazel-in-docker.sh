@@ -145,6 +145,16 @@ if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
         )
     fi
 fi
+# The random half of the reference comparison draws its seed from the
+# clock, so that every test run, in any CI or by hand through this
+# script, compares a fresh sample; the seed is printed into the log
+# after the run, and replays the sample exactly. Passing it as a test
+# argument also keeps Bazel from serving a cached verdict. A test
+# argument is a test option, so it is passed only to the commands that
+# run tests.
+if [ "$COMMAND" = "test" ] || [ "$COMMAND" = "coverage" ]; then
+    BAZEL_OPTS+=(--test_arg=--seed="$(date +%s%N)")
+fi
 if [ -n "${BAZEL_REMOTE_CACHE:-}" ]; then
     BAZEL_OPTS+=(--remote_cache="$BAZEL_REMOTE_CACHE" --remote_upload_local_results=true)
     DOCKER_OPTS+=(--add-host=host.docker.internal:host-gateway)
@@ -168,6 +178,11 @@ if [ "$COMMAND" = "coverage" ]; then
     docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" bash -c '
         bazel coverage "$@" //...
         rc=$?
+        # The seed and digest of the random reference comparison, which
+        # a passing test leaves only in its own log.
+        fuzzer_log=$(find "$(bazel info output_path)" \
+            -path "*/testlogs/tests/differential_fuzzer/test.log" | head -n 1)
+        [ -n "$fuzzer_log" ] && grep -h "^seed=\|^sequences compared" "$fuzzer_log"
         if [ "$rc" -eq 0 ]; then
             cp "$(bazel info output_path)/_coverage/_coverage_report.dat" \
                /workspace/coverage.lcov
@@ -178,8 +193,21 @@ if [ "$COMMAND" = "coverage" ]; then
         exit $rc
     ' coverage-in-container "${BAZEL_OPTS[@]}" "$@"
 else
-    docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" \
-        bazel "$COMMAND" "${BAZEL_OPTS[@]}" --config="$CONFIG" "$@" //...
+    # The arguments are passed positionally, as above. After a test run
+    # the seed and digest of the random reference comparison are
+    # printed into the log, which a passing test leaves only in its own.
+    docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" bash -c '
+        command="$1"
+        shift
+        bazel "$command" "$@" //...
+        rc=$?
+        if [ "$command" = "test" ]; then
+            fuzzer_log=$(find "$(bazel info output_path)" \
+                -path "*/testlogs/tests/differential_fuzzer/test.log" | head -n 1)
+            [ -n "$fuzzer_log" ] && grep -h "^seed=\|^sequences compared" "$fuzzer_log"
+        fi
+        exit $rc
+    ' bazel-in-container "$COMMAND" "${BAZEL_OPTS[@]}" --config="$CONFIG" "$@"
 fi
 rc=$?
 set -e

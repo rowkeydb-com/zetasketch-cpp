@@ -2890,5 +2890,82 @@ TEST(ErrorHandlingTest, ValidateAcceptsEverySketchThisLibraryWrites) {
   }
 }
 
+// A merge the reference refuses before it touches either side leaves
+// this library's receiver as it was too. The two such refusals are the
+// incompatible precisions (one side higher in normal precision and
+// lower in sparse precision) and the kinds of value with nothing in
+// common. The bytes and estimates before and after the attempt, and
+// after a further addition, are the reference's own for the same
+// operations, and equal to a receiver that never attempted the merge.
+TEST(ErrorHandlingTest, ARefusedMergeLeavesTheReceiverAsItWas) {
+  constexpr std::string_view kWithOneValue =
+      "087010011802200b82070c1001180420193204b5ded002";
+  constexpr std::string_view kWithTwoValues =
+      "087010021802200b8207101002180420193208b5ded002ddfc860b";
+  const auto continue_as_the_reference_does =
+      [&](HyperLogLogPlusPlus& receiver) {
+        EXPECT_EQ(SerializedHex(receiver), kWithOneValue);
+        EXPECT_EQ(receiver.Result().value_or(-1), 1);
+        ASSERT_TRUE(receiver.Add("s1").has_value());
+        EXPECT_EQ(SerializedHex(receiver), kWithTwoValues);
+        EXPECT_EQ(receiver.Result().value_or(-1), 2);
+      };
+
+  auto incompatible = HyperLogLogPlusPlus::Create(4, 25);
+  auto lower_sparse = HyperLogLogPlusPlus::Create(5, 5);
+  ASSERT_TRUE(incompatible.has_value() && lower_sparse.has_value());
+  ASSERT_TRUE(incompatible->Add("s0").has_value());
+  EXPECT_EQ(SerializedHex(*incompatible), kWithOneValue);
+  auto merged = incompatible->Merge(std::move(*lower_sparse));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_EQ(merged.error().code,
+            zetasketch::utils::ErrorCode::kIncompatiblePrecision);
+  continue_as_the_reference_does(*incompatible);
+
+  auto text = HyperLogLogPlusPlus::Create(4, 25);
+  auto longs = HyperLogLogPlusPlus::Create(
+      4, 25, zetasketch::hll::ValueType::kUnsignedInt64);
+  ASSERT_TRUE(text.has_value() && longs.has_value());
+  ASSERT_TRUE(text->Add("s0").has_value());
+  ASSERT_TRUE(longs->Add(int64_t{1000}).has_value());
+  merged = text->Merge(std::move(*longs));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_EQ(merged.error().code,
+            zetasketch::utils::ErrorCode::kIllegalArgument);
+  continue_as_the_reference_does(*text);
+}
+
+// The shape the differential spaces leave out: a dense receiver given
+// an operand of lower normal precision. The reference lowers its state
+// for that merge but not its own encoding of it, so its later additions
+// throw or land in the wrong register. This library lowers both
+// together: the merge writes the reference's bytes, and ten further
+// values give the estimate and the bytes of a sketch built dense at the
+// lower precision from the same eleven values.
+TEST(ErrorHandlingTest,
+     ADenseReceiverLoweredByASparseOperandContinuesCorrectly) {
+  auto receiver = HyperLogLogPlusPlus::Create(6, 0);
+  auto operand = HyperLogLogPlusPlus::Create(5, 5);
+  ASSERT_TRUE(receiver.has_value() && operand.has_value());
+  ASSERT_TRUE(receiver->Add("s0").has_value());
+  ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value());
+  EXPECT_EQ(SerializedHex(*receiver),
+            "087010011802200b82072418052a2000000000000200000000000000000000000"
+            "00000000000000000000000000000");
+  auto control = HyperLogLogPlusPlus::Create(5, 0);
+  ASSERT_TRUE(control.has_value());
+  for (int i = 0; i <= 10; ++i) {
+    const std::string value = std::format("s{}", i);
+    if (i > 0) {
+      ASSERT_TRUE(receiver->Add(value).has_value()) << value;
+    }
+    ASSERT_TRUE(control->Add(value).has_value()) << value;
+  }
+  EXPECT_EQ(receiver->Result().value_or(-1), 11);
+  EXPECT_EQ(SerializedHex(*receiver), SerializedHex(*control));
+  EXPECT_EQ(SerializedHex(*control),
+            "0870100b1802200b82072418052a2000000002020200010002000000000104000"
+            "00000000000010000000200000000");
+}
 }  // namespace
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
