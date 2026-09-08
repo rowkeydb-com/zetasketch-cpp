@@ -243,67 +243,75 @@ continues correctly, which is tested in `error_handling_test.cpp`; the
 sparse receiver's case is the ordinary lowering, compared elsewhere
 in the differential tests as a single merge.
 
-### 4. State Machine Cartesian Product Coverage
-The `HyperLogLog++` architecture transitions between `SparseRepresentation` and
-`NormalRepresentation`. The `Merge` function uses `std::visit` to handle the
-Cartesian product of these representations. The testing regimen explicitly
-targets all edges of this state machine:
+### 4. The crossover from the sparse form to the dense one
 
-*   **Sparse + Sparse**: Merging multiple small sketches keeps the state
-    below the SP thresholds.
-*   **Sparse + Sparse -> Promotion to Normal**: Triggered by merging multiple
-    sparse sketches whose combined unique elements exceed the maximum sparse
-    threshold during the merge operation.
-*   **Normal + Normal**: Merging sketches initialized with large element counts
-    forces early promotion to the normal representation prior to the merge.
-*   **Sparse + Normal / Normal + Sparse**: Merging sketches sitting near the
-    capacity threshold. Across multiple sketches, variations in hash collisions
-    result in a mix of sparse and normal structures, forcing the cross-mode
-    variant visitation branches.
-*   **Edge Cases**: The static corpus explicitly verifies `POP0` (completely
-    empty initialization states) and configurations with `SP=0` (which entirely
-    bypass the sparse state machine and initialize as normal).
+A sketch begins sparse and becomes dense when its stream reaches
+three quarters of the register array. At normal precision 10 with
+sparse precision 15, and with 25, for strings and for longs, every
+value from the first to well past the promotion point is followed by
+a write and an estimate on both sides, and every line is compared;
+the step of promotion, read from the bytes, must exist and agree.
+Every write compacts the buffer, so the walk holds the promotion
+check at every step; the flush of a full buffer and a promotion at
+an addition are exercised by the two spaces above. The two other
+roads into the dense form are compared at the same configurations:
+a sketch written one value short of promotion, read back, and given
+the value; and two sparse sketches each holding six tenths of the
+promoting count, merged in both orders.
 
-### 5. Endianness Validation
-Dedicated unit tests confirm that the integrated FarmHash implementation
-produces outputs identical to the Java reference across differing hardware
-architectures, including x86_64 and ARM64.
+### 5. The scope of the verification, stated exactly
+
+- Inputs: strings (hashed as UTF-8 text, or as raw bytes through the
+  byte channel), and 64-bit integers, at encoding version 2. The
+  reference's 32-bit integer mode is not implemented: sketches typed
+  for it are read, written back, merged and estimated by the tests
+  only while empty, since this library offers no 32-bit addition
+  and no test adds one through the reference.
+- Reference: the Java library built from source at revision
+  `d098c49`, on x86_64 and on arm64, under the release build and
+  under the address, undefined-behaviour, thread and memory sanitizers.
+- Precisions: normal precisions 4 to 24 and sparse precisions from
+the normal precision to 25 or disabled are accepted, as the reference
+accepts them; sketches holding values are compared at every normal
+precision from 4 to 12 and at 15, 20 and 24.  - Every error code
+this library defines is produced through a public
+  call in `error_handling_test.cpp`, except the one for a message
+  that fails to serialize, which no input reaches. The branches no
+  public call reaches are listed by name in that file, beside the
+  tests that cover the rest, and the coverage workflow measures
+  the remainder.
 
 ## Architectural Design and Precision
 
-The primary objective of this project is to achieve byte-identical
-serialization with the original Java implementation. Discrepancies in the
-serialized byte array render the output incompatible with the existing Cloud
-Bigtable ecosystem. To ensure this conformity, our architectural strategy
-integrates existing reference logic.
-
-We have incorporated the exact Protocol Buffer definitions (`hllplusplus.proto`)
-directly from Google's repository. We compile these definitions using the
-`protoc` compiler, ensuring that the structural encoding remains accurate.
-Furthermore, we have copied the exact `farmhash.cc` and `farmhash.h` source
-files from Google's FarmHash repository. This guarantees that the
-`Fingerprint64` hashing operations produce results identical to the original
-implementation.
-
-For the internal state machine, which governs the transitions between sparse
-and dense representations, we translated the logic from the `zetasketch-rs`
-Rust codebase. The Rust implementation uses explicit memory management and
-type systems that map directly to C++ constructs, whereas the original Java
-architecture utilizes class inheritance.
+The primary objective of this project is byte-identical serialization
+with the Java implementation. Discrepancies in the serialized bytes
+render the output incompatible with the Cloud Bigtable ecosystem. To
+that end the exact Protocol Buffer definitions (`hllplusplus.proto`)
+are compiled from Google's repository, and the exact `farmhash.cc` and
+`farmhash.h` sources are copied from Google's FarmHash repository,
+so that `Fingerprint64` hashes as the original does. The sparse and
+dense representations were first translated from the `zetasketch-rs`
+Rust codebase and have since been read and corrected function by
+function against the Java source: the flush, the merge, the lowering
+of precisions, the rho computations and the intake of sparse values
+into the dense form.
 
 ## Performance and Code Hygiene
 
-We have designed this library in adherence to the performance constraints
-required by RowKeyDB. There is zero memory allocation on the hot path. We
-avoid dynamic allocation during active sketch mutations, relying upon
-pre-allocated, fixed-capacity arrays managed through Resource Acquisition Is
-Initialization (RAII).
+The library is built to the constraints of RowKeyDB. An addition to
+a dense sketch allocates nothing; the register array is allocated
+once. An addition to a sparse sketch allocates when the buffer grows,
+which happens a logarithmic number of times, and when a full buffer
+is flushed into the stream, which allocates the new stream. A write
+allocates: the state is copied out of the representation, the data
+into the message, and the message into the output; a caller that
+keeps its output vector between writes saves the last of those. A
+refused operation allocates for its message.
 
-The repository continuous integration pipeline executes hermetic builds within
-Docker containers, ensuring determinism across environments. The code is
-subjected to cross-translation-unit (CTU) static analysis using `clang-tidy`,
-and it is continuously monitored by an array of runtime sanitizers (Address,
-Memory, Thread, and Undefined Behavior).
+The continuous integration pipeline executes hermetic builds within
+Docker containers. The code passes `clang-tidy` with the checks named
+in `.clang-tidy`, and every test runs under the address, undefined
+behaviour, thread and memory sanitizers on both architectures.
 
 ## License and Copyright
 

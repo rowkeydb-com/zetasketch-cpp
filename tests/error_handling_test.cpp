@@ -157,7 +157,9 @@ TEST(ErrorHandlingTest, NormalAddSparseValueOutOfBounds) {
 TEST(ErrorHandlingTest, HllFromBytesInvalidData) {
   std::vector<uint8_t> bad_bytes = {0x00, 0xFF, 0x11, 0x22};
   auto res = HyperLogLogPlusPlus::FromBytes(bad_bytes);
-  EXPECT_FALSE(res.has_value());
+  ASSERT_FALSE(res.has_value());
+  EXPECT_EQ(res.error().code,
+            zetasketch::utils::ErrorCode::kProtoDeserialization);
 }
 
 TEST(ErrorHandlingTest, SparseNormalizeInvalidSparseIndex) {
@@ -3001,5 +3003,135 @@ TEST(ErrorHandlingTest, SerializingIntoAVectorReusesItsStorage) {
     EXPECT_EQ(small, *allocated);
   }
 }
+
+// The public surface that the coverage report showed unexercised, and
+// every error code that a public call can produce.
+TEST(ErrorHandlingTest, ReadingFromAStringViewAndWritingIntoAStringAgree) {
+  auto sketch = HyperLogLogPlusPlus::Create(10, 15);
+  ASSERT_TRUE(sketch.has_value());
+  for (int i = 0; i < 50; ++i) {
+    ASSERT_TRUE(sketch->Add(std::format("v{}", i)).has_value());
+  }
+  auto bytes = sketch->Serialize();
+  ASSERT_TRUE(bytes.has_value());
+
+  std::string sink;
+  sink.reserve(bytes->size() * 2);
+  const char* storage = sink.data();
+  ASSERT_TRUE(sketch->Serialize(sink).has_value());
+  EXPECT_EQ(sink.size(), bytes->size());
+  EXPECT_TRUE(std::equal(
+      sink.begin(), sink.end(), bytes->begin(),
+      [](char c, uint8_t b) { return static_cast<uint8_t>(c) == b; }));
+  EXPECT_EQ(sink.data(), storage);
+
+  auto reread = HyperLogLogPlusPlus::FromBytes(std::string_view(sink));
+  ASSERT_TRUE(reread.has_value());
+  auto again = reread->Serialize();
+  ASSERT_TRUE(again.has_value());
+  EXPECT_EQ(*again, *bytes);
+  EXPECT_EQ(reread->Result().value_or(-1), sketch->Result().value_or(-2));
+}
+
+TEST(ErrorHandlingTest, TheNormalEncodingRefusesPrecisionsOutsideItsRange) {
+  for (const int32_t precision : {0, -1, 64}) {
+    auto refused = zetasketch::hll::encoding::Normal::Create(precision);
+    ASSERT_FALSE(refused.has_value()) << precision;
+    EXPECT_EQ(refused.error().code,
+              zetasketch::utils::ErrorCode::kIllegalArgument)
+        << precision;
+  }
+  EXPECT_TRUE(zetasketch::hll::encoding::Normal::Create(1).has_value());
+  EXPECT_TRUE(zetasketch::hll::encoding::Normal::Create(63).has_value());
+}
+
+// A sparse stream that does not decode, read from bytes, is refused on
+// each road a merge can take it down: lowered into a lower-precision
+// operand's encoding, taken value by value into a lower-precision
+// receiver, and normalized to merge with a dense operand. The reference
+// refuses all three at the decode ("Index 18 out of bounds for length
+// 18"); this library reports the decode failure.
+TEST(ErrorHandlingTest, AStreamThatDoesNotDecodeIsRefusedOnEveryMergeRoad) {
+  using zetasketch::utils::ErrorCode;
+  const std::vector<uint8_t> cut = {0x80};
+  const auto decode_failure = [](const zetasketch::utils::Error& error) {
+    return error.code == ErrorCode::kInvalidState &&
+           error.message == "Varint continues past the end of the buffer";
+  };
+
+  auto lowered = SparseSketchOf(10, 15, 1, cut);
+  auto lower_operand = HyperLogLogPlusPlus::Create(9, 14);
+  ASSERT_TRUE(lowered.has_value() && lower_operand.has_value());
+  auto merged = lowered->Merge(std::move(*lower_operand));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_TRUE(decode_failure(merged.error())) << merged.error().message;
+
+  auto lower_receiver = HyperLogLogPlusPlus::Create(9, 14);
+  auto bad_operand = SparseSketchOf(10, 15, 1, cut);
+  ASSERT_TRUE(lower_receiver.has_value() && bad_operand.has_value());
+  merged = lower_receiver->Merge(std::move(*bad_operand));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_TRUE(decode_failure(merged.error())) << merged.error().message;
+
+  auto normalized = SparseSketchOf(10, 15, 1, cut);
+  auto dense_operand = HyperLogLogPlusPlus::Create(10, 0);
+  ASSERT_TRUE(normalized.has_value() && dense_operand.has_value());
+  merged = normalized->Merge(std::move(*dense_operand));
+  ASSERT_FALSE(merged.has_value());
+  EXPECT_TRUE(decode_failure(merged.error())) << merged.error().message;
+}
+
+// A sketch moved into another keeps its values and its type.
+TEST(ErrorHandlingTest, AMovedSketchKeepsItsValuesAndItsType) {
+  auto source = HyperLogLogPlusPlus::Create(10, 15);
+  auto target = HyperLogLogPlusPlus::Create(4, 4);
+  ASSERT_TRUE(source.has_value() && target.has_value());
+  ASSERT_TRUE(source->Add("a").has_value());
+  ASSERT_TRUE(source->Add("b").has_value());
+  const std::string expected = SerializedHex(*source);
+  *target = std::move(*source);
+  EXPECT_EQ(SerializedHex(*target), expected);
+  EXPECT_EQ(target->Result().value_or(-1), 2);
+  ASSERT_TRUE(target->Add("c").has_value());
+  EXPECT_FALSE(target->Add(int64_t{1}).has_value());
+}
+
+// Branches no public call reaches, each named here beside the tests
+// that cover the rest, so that the unverified surface is written down.
+// Every other line of src/ and include/ is reached by a test.
+// - hyperloglogplusplus.cc, Merge: a sparse sketch's normalization not
+//   returning a dense one; Normalize always does.
+// - state.cc, ToByteArray: SerializeToArray and SerializeToString
+//   failing; every field is set and the size is far below the limit,
+//   so kProtoSerialization is never produced.
+// - state.cc, the walk over the message's fields after it parsed: a
+//   varint that does not read, or a field that cannot be skipped; the
+//   message parsed whole a moment before.
+// - sparse_representation.cc, Create: the sparse encoding refusing
+//   precisions CheckPrecision accepted, and the buffer or stream limit
+//   being zero; CheckPrecision refuses every precision below 4 first.
+// - sparse_representation.cc, Normalize: the dense representation
+//   refusing a state the sparse one held.
+// - sparse_representation.cc, Downgrade: a target that is not lower;
+//   every caller lowers only when it is.
+// - sparse_representation.cc, AddSparseValue: an incompatible source
+//   encoding, and lowering this representation to the incoming
+//   encoding; every caller has checked compatibility and lowered it
+//   already.
+// - normal_representation.cc, AddHash: an index past the register
+//   array; the encoding derives the index from the precision that
+//   sized the array.
+// - normal_representation.cc, MaybeDowngrade: the normal encoding
+//   refusing a precision the state already held.
+// - normal_representation.cc, MergeNormalDataMaybeDowngrading: a
+//   source array longer than the target's at the same precision, and a
+//   lowered index past the target; Create refuses a register array
+//   whose length is not 2^p, so no such array is ever read.
+// - math_utils.cc: the bias table's search taking its lower branch on
+//   the last probe, and the interpolation finding no neighbours; the
+//   tables are fixed and never yield either.
+// - buffer_traits.h, ReadVarInt at the end of the data; every caller
+//   checks HasRemaining first (the reader is tested directly in
+//   buffer_writer_test.cpp).
 }  // namespace
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

@@ -60,6 +60,18 @@ TEST(BufferWriterTest, WriteMaxRefusesAnIndexPastTheEnd) {
   EXPECT_EQ(refused.error().code, zetasketch::utils::ErrorCode::kInvalidState);
 }
 
+TEST(BufferReaderTest, ReadsVarintsUntilTheDataEndsAndRefusesBeyond) {
+  const std::vector<uint8_t> data = {0xac, 0x02, 0x05};
+  zetasketch::utils::BufferReader reader(data);
+  EXPECT_TRUE(reader.HasRemaining());
+  EXPECT_EQ(reader.Remaining(), 3U);
+  EXPECT_EQ(reader.ReadVarInt().value_or(-1), 300);
+  EXPECT_EQ(reader.ReadVarInt().value_or(-1), 5);
+  EXPECT_FALSE(reader.HasRemaining());
+  auto refused = reader.ReadVarInt();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.error().code, zetasketch::utils::ErrorCode::kInvalidState);
+}
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

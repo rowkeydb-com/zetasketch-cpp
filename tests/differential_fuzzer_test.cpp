@@ -3126,6 +3126,232 @@ TEST(ReferenceLibraryTest, SamplesThatOnceFailedStillMatchTheReference) {
   }
 }
 
+// The crossover from the sparse form to the dense one, one value at a
+// time. At normal precision 10 with sparse precision 15, and with 25,
+// for strings and for longs, every value from the first to well past
+// the promotion point is followed by a write and an estimate on both
+// sides, and every line is compared. The walk passes through every
+// flush of the buffer and through the promotion itself, so it is where
+// a difference between the reference's compaction on write and this
+// library's would show. Each side's step of promotion, the first write
+// that holds a register array, is read from the bytes and must exist
+// and agree; the walk is long enough that it does.
+struct Walk {
+  Step::Kind kind;
+  int32_t np;
+  int32_t sp;
+};
+
+constexpr std::array<Walk, 4> kWalks = {{
+    {.kind = Step::Kind::kAddStrings, .np = 10, .sp = 15},
+    {.kind = Step::Kind::kAddLongs, .np = 10, .sp = 15},
+    {.kind = Step::Kind::kAddStrings, .np = 10, .sp = 25},
+    {.kind = Step::Kind::kAddLongs, .np = 10, .sp = 25},
+}};
+constexpr int kWalkLength = 1500;
+
+std::string WalkName(const Walk& walk) {
+  return std::format("{}-{}-{}", TypeWord(walk.kind), walk.np, walk.sp);
+}
+
+std::string WalkAddition(const Walk& walk, int i, std::string_view prefix) {
+  return walk.kind == Step::Kind::kAddStrings
+             ? std::format("{}ADD_STRING {}\n", prefix,
+                           EncodeBase64(std::format("w{}", i)))
+             : std::format("{}ADD_LONG {}\n", prefix, i);
+}
+
+std::expected<void, zetasketch::utils::Error> WalkAdd(
+    HyperLogLogPlusPlus& sketch, const Walk& walk, int i) {
+  return walk.kind == Step::Kind::kAddStrings
+             ? sketch.Add(std::format("w{}", i))
+             : sketch.Add(int64_t{i});
+}
+
+// The step at which a written sketch first holds a register array, or
+// none if it never does.
+std::optional<int> PromotionStep(const std::vector<std::string>& hexes) {
+  for (size_t i = 0; i < hexes.size(); ++i) {
+    auto state = zetasketch::hll::State::Parse(ParseHexString(hexes[i]));
+    if (state.has_value() && state->data.has_value()) {
+      return static_cast<int>(i);
+    }
+  }
+  return std::nullopt;
+}
+
+TEST(ReferenceLibraryTest, TheCrossoverToTheDenseFormMatchesStepByStep) {
+  std::string script;
+  for (const Walk& walk : kWalks) {
+    script += std::format("MARK {}/0\nRECEIVER {} {} {}\n", WalkName(walk),
+                          TypeWord(walk.kind), walk.np, walk.sp);
+    for (int i = 1; i <= kWalkLength; ++i) {
+      script += std::format("MARK {}/{}\n", WalkName(walk), i);
+      script += WalkAddition(walk, i, "");
+      script += "CHECKPOINT\nRESULT\n";
+    }
+  }
+  const auto blocks = SplitAtMarks(RunScriptWithReceivers(script));
+  ASSERT_EQ(blocks.size(), kWalks.size() * (kWalkLength + 1));
+
+  size_t block = 0;
+  for (const Walk& walk : kWalks) {
+    const std::string name = WalkName(walk);
+    auto sketch =
+        HyperLogLogPlusPlus::Create(walk.np, walk.sp, TypeOf(walk.kind));
+    ASSERT_TRUE(sketch.has_value()) << name;
+    EXPECT_EQ(blocks[block].first, name + "/0") << name;
+    EXPECT_TRUE(blocks[block].second.empty()) << name;
+    ++block;
+    std::vector<std::string> reference_hexes;
+    std::vector<std::string> my_hexes;
+    for (int i = 1; i <= kWalkLength; ++i, ++block) {
+      const auto& [mark, reference] = blocks[block];
+      ASSERT_EQ(mark, std::format("{}/{}", name, i));
+      ASSERT_EQ(reference.size(), 2U) << name << " step " << i;
+      ASSERT_TRUE(WalkAdd(*sketch, walk, i).has_value())
+          << name << " step " << i;
+      auto bytes = sketch->Serialize();
+      ASSERT_TRUE(bytes.has_value()) << name << " step " << i;
+      auto estimate = sketch->Result();
+      ASSERT_TRUE(estimate.has_value()) << name << " step " << i;
+      const std::vector<std::string> mine = {PrintHex(*bytes),
+                                             std::to_string(*estimate)};
+      EXPECT_EQ(mine, reference) << name << " step " << i;
+      reference_hexes.push_back(reference[0]);
+      my_hexes.push_back(mine[0]);
+    }
+    const std::optional<int> reference_promotion =
+        PromotionStep(reference_hexes);
+    const std::optional<int> my_promotion = PromotionStep(my_hexes);
+    ASSERT_TRUE(reference_promotion.has_value())
+        << name << ": the walk never reached the dense form";
+    EXPECT_EQ(my_promotion, reference_promotion) << name;
+    EXPECT_GT(reference_promotion.value_or(0), 0) << name;
+    EXPECT_LT(reference_promotion.value_or(kWalkLength), kWalkLength - 1)
+        << name;
+    std::cout << std::format("{}: promoted at step {} of {}\n", name,
+                             reference_promotion.value_or(-1) + 1, kWalkLength);
+  }
+}
+
+// The two other roads into the dense form, at the same configurations:
+// a sketch written one value short of promotion, read back, and given
+// the value; and two sparse sketches, each holding six tenths of the
+// values it takes to promote, merged in both orders. Each is compared
+// with the reference line by line.
+TEST(ReferenceLibraryTest, TheCrossoverByReadingAndByMergingMatches) {
+  // The promotion step of each walk, found by walking on this
+  // library's side; the walk test above pins that the reference's is
+  // the same.
+  std::vector<int> promotion_steps;
+  std::vector<std::string> just_below;
+  for (const Walk& walk : kWalks) {
+    auto sketch =
+        HyperLogLogPlusPlus::Create(walk.np, walk.sp, TypeOf(walk.kind));
+    ASSERT_TRUE(sketch.has_value());
+    std::vector<std::string> hexes;
+    for (int i = 1; i <= kWalkLength; ++i) {
+      ASSERT_TRUE(WalkAdd(*sketch, walk, i).has_value());
+      auto bytes = sketch->Serialize();
+      ASSERT_TRUE(bytes.has_value());
+      hexes.push_back(PrintHex(*bytes));
+    }
+    const std::optional<int> promotion = PromotionStep(hexes);
+    ASSERT_TRUE(promotion.has_value() && *promotion > 0) << WalkName(walk);
+    promotion_steps.push_back(*promotion + 1);
+    just_below.push_back(hexes[static_cast<size_t>(*promotion) - 1]);
+  }
+
+  std::string script;
+  for (size_t w = 0; w < kWalks.size(); ++w) {
+    const Walk& walk = kWalks.at(w);
+    const int step = promotion_steps[w];
+    script += std::format("MARK {}/read\nRECEIVER proto {}\n", WalkName(walk),
+                          just_below[w]);
+    script += WalkAddition(walk, step, "");
+    script += "CHECKPOINT\nRESULT\n";
+    const int half = (step * 6) / 10;
+    for (const bool low_first : {true, false}) {
+      script +=
+          std::format("MARK {}/merge-{}\nRECEIVER {} {} {}\n", WalkName(walk),
+                      low_first ? "low-first" : "high-first",
+                      TypeWord(walk.kind), walk.np, walk.sp);
+      const int receiver_from = low_first ? 1 : half + 1;
+      const int operand_from = low_first ? half + 1 : 1;
+      for (int i = receiver_from; i < receiver_from + half; ++i) {
+        script += WalkAddition(walk, i, "");
+      }
+      script += std::format("OPERAND {} {} {}\n", TypeWord(walk.kind), walk.np,
+                            walk.sp);
+      for (int i = operand_from; i < operand_from + half; ++i) {
+        script += WalkAddition(walk, i, "OPERAND_");
+      }
+      script += "MERGE_OPERAND\nCHECKPOINT\nRESULT\n";
+    }
+  }
+  const auto blocks = SplitAtMarks(RunScriptWithReceivers(script));
+  ASSERT_EQ(blocks.size(), kWalks.size() * 3);
+
+  size_t block = 0;
+  for (size_t w = 0; w < kWalks.size(); ++w) {
+    const Walk& walk = kWalks.at(w);
+    const std::string name = WalkName(walk);
+    const int step = promotion_steps[w];
+    const int half = (step * 6) / 10;
+    const auto written_and_estimated = [&](HyperLogLogPlusPlus& sketch) {
+      std::vector<std::string> lines;
+      auto bytes = sketch.Serialize();
+      lines.push_back(bytes.has_value() ? PrintHex(*bytes)
+                                        : "ERROR " + bytes.error().message);
+      auto estimate = sketch.Result();
+      lines.push_back(estimate.has_value()
+                          ? std::to_string(*estimate)
+                          : "ERROR " + estimate.error().message);
+      return lines;
+    };
+
+    ASSERT_EQ(blocks[block].first, name + "/read");
+    auto reread = HyperLogLogPlusPlus::FromBytes(ParseHexString(just_below[w]));
+    ASSERT_TRUE(reread.has_value()) << name;
+    ASSERT_TRUE(WalkAdd(*reread, walk, step).has_value()) << name;
+    EXPECT_EQ(written_and_estimated(*reread), blocks[block].second) << name;
+    auto state = zetasketch::hll::State::Parse(
+        ParseHexString(blocks[block].second.at(0)));
+    ASSERT_TRUE(state.has_value()) << name;
+    EXPECT_TRUE(state->data.has_value())
+        << name << ": not promoted after reading";
+    ++block;
+
+    for (const bool low_first : {true, false}) {
+      ASSERT_EQ(blocks[block].first,
+                std::format("{}/merge-{}", name,
+                            low_first ? "low-first" : "high-first"));
+      auto receiver =
+          HyperLogLogPlusPlus::Create(walk.np, walk.sp, TypeOf(walk.kind));
+      auto operand =
+          HyperLogLogPlusPlus::Create(walk.np, walk.sp, TypeOf(walk.kind));
+      ASSERT_TRUE(receiver.has_value() && operand.has_value()) << name;
+      const int receiver_from = low_first ? 1 : half + 1;
+      const int operand_from = low_first ? half + 1 : 1;
+      for (int i = receiver_from; i < receiver_from + half; ++i) {
+        ASSERT_TRUE(WalkAdd(*receiver, walk, i).has_value()) << name;
+      }
+      for (int i = operand_from; i < operand_from + half; ++i) {
+        ASSERT_TRUE(WalkAdd(*operand, walk, i).has_value()) << name;
+      }
+      ASSERT_TRUE(receiver->Merge(std::move(*operand)).has_value()) << name;
+      EXPECT_EQ(written_and_estimated(*receiver), blocks[block].second)
+          << name << (low_first ? " low first" : " high first");
+      auto merged = zetasketch::hll::State::Parse(
+          ParseHexString(blocks[block].second.at(0)));
+      ASSERT_TRUE(merged.has_value()) << name;
+      EXPECT_TRUE(merged->data.has_value())
+          << name << ": the merge did not promote";
+      ++block;
+    }
+  }
+}
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
