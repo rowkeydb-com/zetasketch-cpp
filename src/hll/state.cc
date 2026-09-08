@@ -179,16 +179,25 @@ zetasketch::AggregatorStateProto BuildProto(const State& state) {
 }  // namespace
 
 std::expected<std::vector<uint8_t>, utils::Error> State::ToByteArray() const {
-  auto proto = BuildProto(*this);
   std::vector<uint8_t> output;
-  output.resize(proto.ByteSizeLong());
-  if (!proto.SerializeToArray(output.data(), static_cast<int>(output.size()))) {
+  auto written = ToByteArray(&output);
+  if (!written.has_value()) return std::unexpected(written.error());
+  return output;
+}
+
+std::expected<void, utils::Error> State::ToByteArray(
+    std::vector<uint8_t>* output) const {
+  auto proto = BuildProto(*this);
+  // A resize within the capacity allocates nothing, so a caller that
+  // keeps its vector between writes pays for the storage once.
+  output->resize(proto.ByteSizeLong());
+  if (!proto.SerializeToArray(output->data(),
+                              static_cast<int>(output->size()))) {
     return std::unexpected(
         utils::Error{.code = utils::ErrorCode::kProtoSerialization,
                      .message = "Failed to serialize state"});
   }
-
-  return output;
+  return {};
 }
 
 std::expected<void, utils::Error> State::ToByteArray(

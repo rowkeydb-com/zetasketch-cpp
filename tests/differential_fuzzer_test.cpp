@@ -2595,6 +2595,11 @@ std::string ReferenceScript(const Sequence& sequence, size_t index,
 struct Performer {
   HyperLogLogPlusPlus receiver;
   std::optional<HyperLogLogPlusPlus> operand;
+  // Set once the reference has refused a block of the sequence. The
+  // receiver of a refused merge is the representation that was moved
+  // out of, whose next write this library's own walk refuses, so the
+  // read-back checks of a write hold only while nothing was refused.
+  bool refused = false;
 };
 
 // Performs one block and returns the lines the reference prints for it.
@@ -2678,6 +2683,7 @@ std::vector<std::string> Perform(Performer& performer, const Sequence& sequence,
         break;
       }
       lines.push_back(PrintHex(*bytes));
+      if (performer.refused) break;
       auto reread = HyperLogLogPlusPlus::FromBytes(*bytes);
       EXPECT_TRUE(reread.has_value()) << Describe(sequence);
       if (!reread.has_value()) break;
@@ -2760,7 +2766,8 @@ std::vector<size_t> CompareWithTheReference(
       continue;
     }
     Performer performer{.receiver = std::move(*receiver),
-                        .operand = std::nullopt};
+                        .operand = std::nullopt,
+                        .refused = false};
     bool refused = false;
     for (const Block& expected_block : blocks_of[index]) {
       const auto& [name, reference] = blocks[block++];
@@ -2776,6 +2783,7 @@ std::vector<size_t> CompareWithTheReference(
         sequences_refused.push_back(index);
       }
       if (mine != expected) refused = true;
+      performer.refused = refused;
     }
   }
   return sequences_refused;
@@ -2958,7 +2966,8 @@ TEST(ReferenceLibraryTest, ThePromotingAdditionPromotesAtEveryConfiguration) {
         auto receiver = HyperLogLogPlusPlus::Create(np, sp, TypeOf(kind));
         ASSERT_TRUE(receiver.has_value());
         Performer performer{.receiver = std::move(*receiver),
-                            .operand = std::nullopt};
+                            .operand = std::nullopt,
+                            .refused = false};
         for (const Block& block : BlocksOf(sequence, 0)) {
           EXPECT_TRUE(Perform(performer, sequence, block).empty())
               << Describe(sequence);
@@ -3091,6 +3100,30 @@ TEST(ReferenceLibraryTest, RandomSequencesMatchTheReference) {
             << "; refused by the reference at some block: " << refused.size()
             << "\n";
   ::testing::Test::RecordProperty("refused", static_cast<int>(refused.size()));
+}
+
+// Every sample that ever failed, replayed by its seed on every run,
+// beside the fresh sample above, so that a divergence once found cannot
+// return unnoticed. A failure of the fresh sample is fixed by adding
+// its seed here.
+constexpr std::array<uint64_t, 1> kSeedsThatOnceFailed = {
+    // 2026-09-08, in CI: a write after a refused merge was read back and
+    // failed this library's own walk; the read-back now stops at the
+    // first refusal.
+    1788843027833786251ULL,
+};
+
+TEST(ReferenceLibraryTest, SamplesThatOnceFailedStillMatchTheReference) {
+  for (const uint64_t seed : kSeedsThatOnceFailed) {
+    const std::vector<Sequence> sequences =
+        RandomSequences(seed, kRandomSequences);
+    const std::vector<size_t> refused = CompareWithTheReference(
+        sequences, std::format("sample that once failed, seed {}", seed));
+    std::cout << std::format(
+        "seed={} digest={:016x} replayed; refused by the reference at some "
+        "block: {}\n",
+        seed, DigestOf(sequences), refused.size());
+  }
 }
 
 }  // namespace

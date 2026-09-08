@@ -181,8 +181,9 @@ is compared, on either side. After an incompatible-precision or
 cross-kind refusal both libraries leave the receiver as it was,
 which is tested in `error_handling_test.cpp`; after a throw that
 interrupts a merge part way, the reference's state is not defined.
-This library's remaining steps are still performed, and its writes
-must still read back, walk and rewrite.
+This library's remaining steps are still performed, and must not
+fault; the receiver of a refused merge is left as it was moved out
+of, so its later writes are not read back.
 
 On top of that, every continuous-integration test job draws a seed
 from the clock and compares 600 random sequences of up to twelve
@@ -201,7 +202,9 @@ and the replay can be seen to be the same sample. Every job of a run,
 and every re-run, draws its own seed; the CI script passes it as a
 test argument, which also keeps Bazel from serving a cached verdict.
 Locally, Bazel returns a cached result for unchanged inputs; a new
-sample needs a new seed or `--nocache_test_results`.
+sample needs a new seed or `--nocache_test_results`. Every sample
+that ever failed is replayed by its seed on every run, from a fixed
+list in the test, so a divergence once found cannot return unnoticed.
 
 What may be claimed from these tests, in full:
 
@@ -226,8 +229,8 @@ job therefore records in its log a seed and a digest from which its
 every compared step agreed; about a quarter of them are compared
 only up to a refusal both libraries make. What grows with every job
 is the number of sequences on which agreement has been observed.
-Nothing is claimed about sequences that have not been compared, and
-no probability of agreement on them is claimed.
+Nothing is claimed about sequences that have not been compared,
+and no probability of agreement on them is claimed.
 
 One shape is left out of both spaces: an operand at a lower normal
 precision than the receiver, in either representation. The reason

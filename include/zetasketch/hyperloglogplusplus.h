@@ -170,11 +170,16 @@ class HyperLogLogPlusPlus {
   // promotes is left promoted and estimated as a dense one afterwards.
   [[nodiscard]] std::expected<std::vector<uint8_t>, utils::Error> Serialize();
 
-  // Serializes into a provided buffer to avoid allocation.
+  // Serializes into a provided vector, reusing its storage where the
+  // capacity allows, which saves the output allocation of the overload
+  // above; a write still copies the state out of the representation,
+  // the data into the message, and the message into the output, and
+  // allocates for the first two. The compaction is the same as above.
   [[nodiscard]] std::expected<void, utils::Error> Serialize(
       std::vector<uint8_t>& sink);
 
-  // Serializes into a provided string buffer to avoid allocation.
+  // Serializes into a provided string, reusing its storage where the
+  // capacity allows, with the same copies as above.
   [[nodiscard]] std::expected<void, utils::Error> Serialize(std::string& sink);
 
  private:

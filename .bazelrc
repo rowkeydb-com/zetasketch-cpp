@@ -6,6 +6,14 @@
 # C++23 across the project.
 build --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
 
+# The reference harness and protobuf's Java runtime are compiled and run
+# on the hermetic JDK 21 that rules_java downloads, on every host alike.
+# Left to the default, the local JDK is taken as the target runtime, and
+# a host with a newer JDK than the toolchain's javac cannot compile for
+# it.
+build --java_language_version=21 --java_runtime_version=remotejdk_21
+build --tool_java_language_version=21 --tool_java_runtime_version=remotejdk_21
+
 # No exceptions, no RTTI, per Google C++ Style Guide.
 build --cxxopt=-fno-exceptions --host_cxxopt=-fno-exceptions
 build --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti

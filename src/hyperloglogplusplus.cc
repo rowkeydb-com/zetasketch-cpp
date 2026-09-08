@@ -585,13 +585,9 @@ HyperLogLogPlusPlus::Serialize() {
 
 std::expected<void, utils::Error> HyperLogLogPlusPlus::Serialize(
     std::vector<uint8_t>& sink) {
-  auto bytes_result = Serialize();
-  if (!bytes_result.has_value()) {
-    return std::unexpected(bytes_result.error());
-  }
-
-  sink = std::move(bytes_result.value());
-  return {};
+  auto state_res = GetStateForSerialization();
+  if (!state_res.has_value()) return std::unexpected(state_res.error());
+  return state_res.value().ToByteArray(&sink);
 }
 
 std::expected<void, utils::Error> HyperLogLogPlusPlus::Serialize(

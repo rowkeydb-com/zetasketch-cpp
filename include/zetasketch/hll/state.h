@@ -58,6 +58,11 @@ struct State {
   // Serializes the internal state directly into a provided string buffer.
   [[nodiscard]] std::expected<void, utils::Error> ToByteArray(
       std::string* output) const;
+
+  // Serializes the internal state into a provided vector, reusing its
+  // storage where the capacity allows.
+  [[nodiscard]] std::expected<void, utils::Error> ToByteArray(
+      std::vector<uint8_t>* output) const;
 };
 
 }  // namespace zetasketch::hll

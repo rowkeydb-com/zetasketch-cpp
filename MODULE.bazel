@@ -14,7 +14,7 @@ git_repository(
 
 # --- Dependencies ---
 bazel_dep(name = "rules_cc", version = "0.0.9")
-bazel_dep(name = "protobuf", version = "27.2")
+bazel_dep(name = "protobuf", version = "33.5")
 bazel_dep(name = "googletest", version = "1.14.0")
 bazel_dep(name = "rules_jvm_external", version = "6.1")
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
@@ -30,13 +30,20 @@ maven.install(
         "com.google.code.findbugs:jsr305:3.0.2",
         "com.google.errorprone:error_prone_annotations:2.14.0",
         "com.google.guava:guava:33.0.0-jre",
-        "com.google.protobuf:protobuf-java:4.27.2",
+        "com.google.protobuf:protobuf-java:4.33.5",
         "it.unimi.dsi:fastutil:8.2.2",
         "org.checkerframework:checker-qual:3.30.0",
     ],
     repositories = [
         "https://repo1.maven.org/maven2",
     ],
+    # Pinned, so that a build resolves nothing and fetches only what the
+    # lock file names; Maven Central has rate-limited the unpinned
+    # resolution in CI. Regenerate with `bazel run @maven//:pin`.
+    lock_file = "//:maven_install.json",
+    # A lock file behind the artifact list fails the build rather than
+    # resolving unpinned, which is what the pin is for.
+    fail_if_repin_required = True,
 )
 use_repo(maven, "maven")
 

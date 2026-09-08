@@ -2967,5 +2967,39 @@ TEST(ErrorHandlingTest,
             "0870100b1802200b82072418052a2000000002020200010002000000000104000"
             "00000000000010000000200000000");
 }
+
+// A vector serialized into keeps its storage when its capacity allows,
+// and holds the same bytes the allocating overload returns; a vector
+// too small grows to fit.
+TEST(ErrorHandlingTest, SerializingIntoAVectorReusesItsStorage) {
+  struct Shape {
+    int32_t np;
+    int32_t sp;
+  };
+  for (const Shape shape :
+       {Shape{.np = 10, .sp = 15}, Shape{.np = 15, .sp = 0}}) {
+    auto sketch = HyperLogLogPlusPlus::Create(shape.np, shape.sp);
+    ASSERT_TRUE(sketch.has_value());
+    for (int i = 0; i < 100; ++i) {
+      ASSERT_TRUE(sketch->Add(std::format("v{}", i)).has_value());
+    }
+    auto allocated = sketch->Serialize();
+    ASSERT_TRUE(allocated.has_value());
+
+    std::vector<uint8_t> sink;
+    sink.reserve(allocated->size() * 2);
+    const uint8_t* storage = sink.data();
+    ASSERT_TRUE(sketch->Serialize(sink).has_value());
+    EXPECT_EQ(sink, *allocated);
+    EXPECT_EQ(sink.data(), storage);
+    ASSERT_TRUE(sketch->Serialize(sink).has_value());
+    EXPECT_EQ(sink, *allocated);
+    EXPECT_EQ(sink.data(), storage);
+
+    std::vector<uint8_t> small = {1, 2, 3};
+    ASSERT_TRUE(sketch->Serialize(small).has_value());
+    EXPECT_EQ(small, *allocated);
+  }
+}
 }  // namespace
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
