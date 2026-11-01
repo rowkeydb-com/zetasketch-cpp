@@ -2,38 +2,14 @@
 #
 # The options shared with rowkeydb, rowkeyraft and limen are in
 # bazel/build_infra/shared.bazelrc, a checked copy of
-# rowkeydb-com/rowkeydb-build-infra's, imported below: the compilers, the
-# C++ standard, the warnings, the options of third-party code, the
-# sanitizer, clang-tidy, coverage and BuildBuddy configurations, and the
-# image every action runs in. This file holds what is zetasketch-cpp's own.
-# Bazel keeps the values of an accumulating option in the order it reads
-# them, an imported file being read at its import line, so a line here
-# stands where its order among the shared values requires.
-
-# Use host-OS-specific config lines from bazelrc files. The build:linux
-# group is expanded at the position of this option, so it stays first.
-build --enable_platform_specific_config=true
-
-# Treat external dependencies' headers as system headers, so that a
-# warning raised inside them does not fail the -Werror build of the code
-# which includes them. The shared options silence the warnings of
-# third-party compilations themselves.
-build --features=external_include_paths
+# rowkeydb-com/rowkeydb-build-infra's, imported first: the compilers, the
+# C++ standard, the warnings, the options of all code, the sanitizer,
+# clang-tidy, coverage and BuildBuddy configurations, and the image every
+# action runs in. The lines after it are zetasketch-cpp's own; each is on
+# the allowlist that repository keeps for zetasketch-cpp, with its reason,
+# and its scripts/check.sh refuses any other.
 
 import %workspace%/bazel/build_infra/shared.bazelrc
-
-# The code protoc generates from the vendored ZetaSketch protos is not
-# ours to change, so its warnings are silenced as a dependency's are.
-build --per_file_copt=src/proto/.*@-w
-
-# Debug symbols and frame pointers in every build mode, for the stack
-# traces of crashes and sanitizer reports. The shared options give the
-# same two to third-party code; this line gives them to zetasketch-cpp's
-# own, excluding a file by its path and by its label, as rowkeydb does.
-# The symbols are kept at link: without this Bazel strips every binary of
-# the fastbuild mode, in which the sanitizers run.
-build:linux --per_file_copt=.*,-external/.*,-^[^/][^/][^/]+//@-g,-fno-omit-frame-pointer
-build --strip=never
 
 # The reference harness and protobuf's Java runtime are compiled and run
 # on the hermetic JDK 21 that rules_java downloads, on every host alike.
@@ -45,16 +21,6 @@ build --strip=never
 # this one's, and with it every key of the actions built in it.
 build --java_language_version=21 --java_runtime_version=remotejdk_21
 
-# Print full output (including sanitizer reports and clang-tidy
-# findings) for failed actions, not just a truncated summary.
-build --verbose_failures
-test --test_output=errors
-
-# clang-tidy: the shared options give the aspect and //:clang_tidy_config.
-# The compilation it reads is Clang's, so that the thread-safety
-# annotations are enforced in it as in the sanitizer builds.
-build:clang-tidy --config=clang
-
 # clang-tidy combined with the Clang Static Analyzer (path-sensitive checks)
 build:clang-tidy-analyzer --config=clang
 build:clang-tidy-analyzer --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl%clang_tidy_aspect
@@ -64,28 +30,7 @@ build:clang-tidy-analyzer --output_groups=report
 # Coverage: only the library's own top-level package is instrumented.
 coverage --instrumentation_filter="^//:"
 
-# BuildBuddy: the shared options give the endpoints, the cache, what is
-# sent about each run, and the platforms the actions run on, under
-# buildbuddy and, for the thread and memory sanitizers' tests, which run in
-# virtual machines, buildbuddy-tsan and buildbuddy-msan. Those are the same
-# for every repository which shares them, so that the actions of the
-# dependencies are built once for all of them, and none is set here.
-# .github/scripts/run-bazel-in-docker.sh adds the configuration when it is
-# told to use BuildBuddy; it runs Bazel in the image the executors use,
-# which the shared options name. The key is in no file of the
-# repository: Bazel asks the credential helper for it, and the helper reads
-# BUILDBUDDY_API_KEY or ~/.config/buildbuddy/api-key. The workspace status
-# script tells BuildBuddy the repository, commit, branch, user and host of
-# each run.
-build:buildbuddy --credential_helper=remote.buildbuddy.io=%workspace%/.github/scripts/buildbuddy-credential-helper.sh
-build:buildbuddy --workspace_status_command=.github/scripts/buildbuddy-workspace-status.sh
-
 # A test run under BuildBuddy downloads no test output but the logs Bazel
 # needs; the reference comparison's log is downloaded as well, so that
 # the runner script can print its seed and digest into the job's log.
 test:buildbuddy --remote_download_regex=.*/testlogs/tests/differential_fuzzer/test\.log$
-
-# Try the user-local bazelrc if it exists. Not committed. Use this to
-# set credentials, point at a personal remote cache, or override any
-# of the configs above without touching the committed file.
-try-import %workspace%/.bazelrc.user

@@ -107,7 +107,17 @@ DOCKER_OPTS+=(-e USER=zetasketch-cpp)
 DOCKER_OPTS+=(-v "$WORKSPACE_DIR:/workspace")
 DOCKER_OPTS+=(-w /workspace)
 
-BAZEL_OPTS=()
+# The configuration of the processor comes first on every command line,
+# so that it stands at the same place in every repository which shares
+# the build options, and their compilations stay equal. The shared
+# options build for x86-64 alone.
+case "$(uname -m)" in
+    x86_64) BAZEL_OPTS=(--config=amd64) ;;
+    *)
+        echo "Error: the shared build options build for x86-64 only, not $(uname -m)" >&2
+        exit 1
+        ;;
+esac
 
 # Keep Bazel's disk cache on the host so that it survives the container,
 # which is otherwise discarded along with everything built inside it. The

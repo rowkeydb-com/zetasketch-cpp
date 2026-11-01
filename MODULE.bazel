@@ -1,6 +1,6 @@
 module(
     name = "zetasketch-cpp",
-    version = "0.1.0",
+    version = "0.9.1",
 )
 
 # The build infrastructure shared with rowkeydb, rowkeyraft and limen: the
@@ -11,13 +11,13 @@ module(
 # copied from the same commit. A development dependency, as the design's
 # section on the shared Bazel module requires of a library: a consumer of
 # zetasketch-cpp need not find the module in any registry.
-bazel_dep(name = "rowkeydb_build_infra", version = "0.8.0", dev_dependency = True)
+bazel_dep(name = "rowkeydb_build_infra", version = "0.9.0", dev_dependency = True)
 archive_override(
     module_name = "rowkeydb_build_infra",
-    integrity = "sha256-Ey69Vx5aGhVK7hb+Jl33ULD6rbUY5PHZBUz5rFwWPd4=",
-    strip_prefix = "rowkeydb-build-infra-3dd5cce32a5865b5ee1bda60c9997d23ddd004aa",
+    integrity = "sha256-D7t8EBse/u0hZh5Dnbt8BQOfAHtEdd/f8+ZeY+00tXQ=",
+    strip_prefix = "rowkeydb-build-infra-0e346a1b7cc6f85484aeb7983614bf13d22c227a",
     urls = [
-        "https://github.com/rowkeydb-com/rowkeydb-build-infra/releases/download/v0.8.0/rowkeydb-build-infra-3dd5cce32a5865b5ee1bda60c9997d23ddd004aa.tar.gz",
+        "https://github.com/rowkeydb-com/rowkeydb-build-infra/releases/download/v0.9.0/rowkeydb-build-infra-0e346a1b7cc6f85484aeb7983614bf13d22c227a.tar.gz",
     ],
 )
 
@@ -37,9 +37,15 @@ git_repository(
 # version.
 bazel_dep(name = "rules_cc", version = "0.2.26")
 bazel_dep(name = "protobuf", version = "36.2")
-bazel_dep(name = "googletest", version = "1.18.0")
-bazel_dep(name = "rules_jvm_external", version = "6.9")
-maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+
+# --- Test dependencies ---
+# Development dependencies: googletest, and the Java reference
+# implementation with its Maven artifacts, which only the tests use. A
+# consumer of zetasketch-cpp builds the library alone, and takes none of
+# them into its graph.
+bazel_dep(name = "googletest", version = "1.18.0", dev_dependency = True)
+bazel_dep(name = "rules_jvm_external", version = "6.9", dev_dependency = True)
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven", dev_dependency = True)
 
 # The dependencies of the Java reference implementation, taken from its
 # own build definition. The protobuf runtime is pinned to the version
@@ -77,6 +83,7 @@ use_repo(maven, "maven")
 http_archive(
     name = "zetasketch_java",
     build_file = "//third_party:zetasketch_java.BUILD",
+    dev_dependency = True,
     sha256 = "0172dc137146dbb7102c586c42d62e246064dc494a210522a0ae2a6874ae0db4",
     strip_prefix = "zetasketch-d098c49efb5a5bc70eec89c028a38b14b930ca98",
     urls = ["https://github.com/google/zetasketch/archive/d098c49efb5a5bc70eec89c028a38b14b930ca98.tar.gz"],

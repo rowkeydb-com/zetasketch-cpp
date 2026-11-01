@@ -69,6 +69,20 @@ jobs:
               find .github/scripts -name "*.sh" -print0 | xargs -0 -r shellcheck
             '
 
+      - name: Execute build infrastructure verification
+        # scripts/check.sh, from the newest commit of the infrastructure's
+        # main, compares the copy of the shared options, the pin of the
+        # release and this repository's own build lines with the release
+        # MODULE.bazel names and with this repository's allowlist. It runs
+        # no Bazel.
+        run: |
+          infra="$RUNNER_TEMP/rowkeydb-build-infra"
+          rm -rf "$infra"
+          git clone --quiet https://github.com/rowkeydb-com/rowkeydb-build-infra.git "$infra"
+          docker run --rm -v "$PWD":/workspace -v "$infra":/infra:ro \
+            --user "$(id -u):$(id -g)" -w /workspace "$CI_DOCKER_IMAGE" \
+            /infra/scripts/check.sh /workspace
+
       - name: Execute actionlint verification
         uses: reviewdog/action-actionlint@619a81ec64ff8c0211cd6146eb2b21e8f1d7f440  # v1.81.1
         with:
