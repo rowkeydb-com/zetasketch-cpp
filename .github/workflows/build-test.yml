@@ -1,69 +1,44 @@
 name: Build and Test
 
+# Bazel runs in the image rowkeydb-com/rowkeydb-build-infra publishes,
+# named by digest below, on one of GitHub's machines. Where the
+# repository's BuildBuddy secret reaches the run, as it reaches a push and
+# a pull request from a branch of this repository, BuildBuddy runs the
+# actions, which share its cache with the other repositories built on that
+# infrastructure. GitHub gives no secret to a pull request from a fork,
+# whose actions therefore run on GitHub's machine.
+
 on:
   push:
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+env:
+  CI_DOCKER_IMAGE: ghcr.io/rowkeydb-com/rowkeydb-build-infra@sha256:c811e74114ebedf787178468c9a796e4e37ae7e55f2d2fdc63501ea940c04515
+  ZETASKETCH_EXECUTION: ${{ secrets.BUILDBUDDY_API_KEY != '' && 'buildbuddy' || 'local' }}
+
 jobs:
   build-test:
-    name: Build and test (release) - ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-      packages: read
+    name: Build and test (release)
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Obtain CI Docker image
-        env:
-          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}/ci
-          IMAGE_VERSION: ${{ hashFiles('.github/Dockerfile.ci') }}-${{ runner.arch }}
-          LOCAL_IMAGE: zetasketch-cpp-ci
-          STAGE: base
-          REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: .github/scripts/obtain-ci-image.sh
-
-
-      - name: Cache Bazel state
-        uses: actions/cache@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          path: .bazel-cache
-          key: bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-${{ github.workflow }}-${{ github.sha }}
-          restore-keys: |
-            bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-${{ github.workflow }}-
-            bazel-cache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.os }}-
-
-      - name: Cache Bazel repository cache
-        uses: actions/cache@v4
-        with:
-          path: .bazel-repos
-          key: bazel-repos-${{ runner.arch }}-${{ hashFiles('MODULE.bazel.lock') }}
-          restore-keys: |
-            bazel-repos-${{ runner.arch }}-
-
-      - name: Ensure Bazel cache directory exists
-        run: mkdir -p .bazel-cache .bazel-repos
+          # No later step needs the token.
+          persist-credentials: false
 
       - name: Execute Bazel release test suite
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-        run: |
-          BAZEL_FLAGS=""
-          if [ -n "$BUILDBUDDY_API_KEY" ]; then
-            BAZEL_FLAGS="--config=buildbuddy --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY --disk_cache="
-          fi
-          .github/scripts/run-bazel-in-docker.sh release test $BAZEL_FLAGS
+        run: .github/scripts/run-bazel-in-docker.sh release test

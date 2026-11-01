@@ -1,124 +1,59 @@
-# RowKeyRaft Bazel configuration.
+# zetasketch-cpp Bazel configuration.
 #
-# Common build flags are below. Sanitizer and static-analysis
-# configurations are layered on top with `--config=<name>`.
+# The options shared with rowkeydb, rowkeyraft and limen are in
+# bazel/build_infra/shared.bazelrc, a checked copy of
+# rowkeydb-com/rowkeydb-build-infra's, imported below: the compilers, the
+# C++ standard, the warnings, the options of third-party code, the
+# sanitizer, clang-tidy, coverage and BuildBuddy configurations, and the
+# image every action runs in. This file holds what is zetasketch-cpp's own.
+# Bazel keeps the values of an accumulating option in the order it reads
+# them, an imported file being read at its import line, so a line here
+# stands where its order among the shared values requires.
 
-# C++23 across the project.
-build --cxxopt=-std=c++23 --host_cxxopt=-std=c++23
+# Use host-OS-specific config lines from bazelrc files. The build:linux
+# group is expanded at the position of this option, so it stays first.
+build --enable_platform_specific_config=true
+
+# Treat external dependencies' headers as system headers, so that a
+# warning raised inside them does not fail the -Werror build of the code
+# which includes them. The shared options silence the warnings of
+# third-party compilations themselves.
+build --features=external_include_paths
+
+import %workspace%/bazel/build_infra/shared.bazelrc
+
+# The code protoc generates from the vendored ZetaSketch protos is not
+# ours to change, so its warnings are silenced as a dependency's are.
+build --per_file_copt=src/proto/.*@-w
+
+# Debug symbols and frame pointers in every build mode, for the stack
+# traces of crashes and sanitizer reports. The shared options give the
+# same two to third-party code; this line gives them to zetasketch-cpp's
+# own, excluding a file by its path and by its label, as rowkeydb does.
+# The symbols are kept at link: without this Bazel strips every binary of
+# the fastbuild mode, in which the sanitizers run.
+build:linux --per_file_copt=.*,-external/.*,-^[^/][^/][^/]+//@-g,-fno-omit-frame-pointer
+build --strip=never
 
 # The reference harness and protobuf's Java runtime are compiled and run
 # on the hermetic JDK 21 that rules_java downloads, on every host alike.
 # Left to the default, the local JDK is taken as the target runtime, and
 # a host with a newer JDK than the toolchain's javac cannot compile for
-# it.
+# it. The options are the target's only: the tools Bazel runs keep the
+# defaults, as in the other repositories which share the options, whose
+# execution configuration, protoc's included, would otherwise differ from
+# this one's, and with it every key of the actions built in it.
 build --java_language_version=21 --java_runtime_version=remotejdk_21
-build --tool_java_language_version=21 --tool_java_runtime_version=remotejdk_21
-
-# No exceptions, no RTTI, per Google C++ Style Guide.
-build --cxxopt=-fno-exceptions --host_cxxopt=-fno-exceptions
-build --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti
-
-# Strict warning hygiene enforced globally for both target and host platforms.
-build --cxxopt=-Wall --host_cxxopt=-Wall
-build --cxxopt=-Wextra --host_cxxopt=-Wextra
-build --cxxopt=-Werror --host_cxxopt=-Werror
-build --cxxopt=-Wno-deprecated-builtins --host_cxxopt=-Wno-deprecated-builtins
 
 # Print full output (including sanitizer reports and clang-tidy
 # findings) for failed actions, not just a truncated summary.
 build --verbose_failures
-
-# Inhibit all warnings in external dependencies (e.g. boringssl, protobuf)
-# and generated protobuf code to eliminate CI console noise.
-build --per_file_copt="external/.*@-w"
-build --per_file_copt="src/proto/.*@-w"
-build --host_per_file_copt="external/.*@-w"
-build --host_per_file_copt="src/proto/.*@-w"
 test --test_output=errors
 
-# `--config=clang` enables Clang's thread-safety annotation
-# enforcement. Chained from sanitizer configs below so every
-# sanitizer build also enforces the annotations. The repo_env
-# lines tell Bazel to use the Clang toolchain rather than the
-# host default (often GCC, which does not recognise
-# -Wthread-safety).
-build:clang --repo_env=CC=clang
-build:clang --repo_env=CXX=clang++
-build:clang --cxxopt=-Wthread-safety --host_cxxopt=-Wthread-safety
-build:clang --cxxopt=-Werror=thread-safety --host_cxxopt=-Werror=thread-safety
-# Clang 18 on Ubuntu 24.04 defines __cpp_concepts=201907L which breaks libstdc++'s <expected>
-build:clang --cxxopt=-D__cpp_concepts=202002L --host_cxxopt=-D__cpp_concepts=202002L
-
-# Release build: optimised, no debug assertions.
-build:release --compilation_mode=opt
-
-# AddressSanitizer + UndefinedBehaviorSanitizer.
-build:asan-ubsan --config=clang
-build:asan-ubsan --copt=-fsanitize=address,undefined
-# Without this the undefined-behaviour sanitizer prints its diagnostic
-# and carries on, so a test that provokes undefined behaviour still
-# passes and the report is hidden by --test_output=errors.
-build:asan-ubsan --copt=-fno-sanitize-recover=all
-build:asan-ubsan --copt=-fno-omit-frame-pointer
-build:asan-ubsan --copt=-O1
-build:asan-ubsan --linkopt=-fsanitize=address,undefined
-build:asan-ubsan --linkopt=-rtlib=compiler-rt
-build:asan-ubsan --strip=never
-
-# ThreadSanitizer.
-build:tsan --config=clang
-build:tsan --copt=-fsanitize=thread
-build:tsan --copt=-fno-omit-frame-pointer
-build:tsan --copt=-O1
-build:tsan --linkopt=-fsanitize=thread
-build:tsan --linkopt=-rtlib=compiler-rt
-build:tsan --strip=never
-
-# MemorySanitizer (requires instrumented libc++).
-# Core MSan flags to enable memory sanitization, keep debug symbols,
-# track uninitialized value origins, and preserve frame pointers.
-build:msan --config=clang
-build:msan --copt=-fsanitize=memory
-build:msan --copt=-fsanitize-memory-track-origins
-build:msan --copt=-fsanitize-memory-use-after-dtor
-build:msan --copt=-O1
-build:msan --copt=-fno-omit-frame-pointer
-build:msan --cxxopt=-std=c++23
-build:msan --linkopt=-fsanitize=memory
-build:msan --linkopt=-rtlib=compiler-rt
-build:msan --action_env=MSAN_OPTIONS=poison_in_dtor=1
-build:msan --cxxopt=-Wno-deprecated-declarations
-build:msan --strip=never
-
-# Direct Clang to compile and link using libc++ instead of the default libstdc++.
-build:msan --cxxopt=-stdlib=libc++
-build:msan --linkopt=-stdlib=libc++
-
-# Point the compiler and linker to your MSan-instrumented libc++ paths.
-build:msan --cxxopt=-isystem/usr/lib/llvm-18/include/c++/v1
-build:msan --linkopt=-L/usr/lib/llvm-18/lib/msan
-
-# Explicitly link the C++ standard library and its ABI
-build:msan --cxxopt=-fexperimental-library
-build:msan --linkopt=-lc++
-build:msan --linkopt=-lc++abi
-build:msan --linkopt=-lc++experimental
-
-# Bake the custom library path directly into the executable's search path.
-build:msan --linkopt=-Wl,-rpath,/usr/lib/llvm-18/lib/msan
-
-# Explicit architecture aliases for the CI matrix
-build:msan-amd64 --config=msan
-build:msan-arm64 --config=msan
-
-# clang-tidy via the upstream Bazel integration (aspect-based).
-# Note: the actual aspect wiring is added when rowkeyraft's first
-# library target lands; for now this config is a placeholder
-# that ensures the `--config=clang-tidy` switch is recognised.
+# clang-tidy: the shared options give the aspect and //:clang_tidy_config.
+# The compilation it reads is Clang's, so that the thread-safety
+# annotations are enforced in it as in the sanitizer builds.
 build:clang-tidy --config=clang
-build:clang-tidy --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl%clang_tidy_aspect
-build:clang-tidy --@bazel_clang_tidy//:clang_tidy_config=//:clang_tidy_config
-build:clang-tidy --output_groups=report
 
 # clang-tidy combined with the Clang Static Analyzer (path-sensitive checks)
 build:clang-tidy-analyzer --config=clang
@@ -126,36 +61,31 @@ build:clang-tidy-analyzer --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl
 build:clang-tidy-analyzer --@bazel_clang_tidy//:clang_tidy_config=//:clang_tidy_analyzer_config
 build:clang-tidy-analyzer --output_groups=report
 
-# Coverage with lcov. Uses the default GCC toolchain because Bazel's
-# gcov-based coverage pipeline produces an empty lcov report when paired
-# with Clang's .gcda format. Thread-safety annotation enforcement still
-# runs in every other configuration (release, asan-ubsan, tsan,
-# clang-tidy), so coverage giving up that single guard does not weaken
-# the overall safety net.
-coverage --combined_report=lcov
+# Coverage: only the library's own top-level package is instrumented.
 coverage --instrumentation_filter="^//:"
-coverage --instrument_test_targets=false
 
-# Remote-cache scaffolding. The cache is off by default. To turn it
-# on for a developer machine or a CI environment, set the URL via a
-# local .bazelrc.user (loaded below) or pass --config=remote-cache on
-# the command line, with the URL configured via --remote_cache=...
-# either inline or in the user file.
-build:remote-cache --remote_cache_compression=true
-# build:remote-cache --remote_cache=https://example.invalid/cache
-# build:remote-cache --remote_upload_local_results=true
+# BuildBuddy: the shared options give the endpoints, the cache, what is
+# sent about each run, and the platforms the actions run on, under
+# buildbuddy and, for the thread and memory sanitizers' tests, which run in
+# virtual machines, buildbuddy-tsan and buildbuddy-msan. Those are the same
+# for every repository which shares them, so that the actions of the
+# dependencies are built once for all of them, and none is set here.
+# .github/scripts/run-bazel-in-docker.sh adds the configuration when it is
+# told to use BuildBuddy; it runs Bazel in the image the executors use,
+# which the shared options name. The key is in no file of the
+# repository: Bazel asks the credential helper for it, and the helper reads
+# BUILDBUDDY_API_KEY or ~/.config/buildbuddy/api-key. The workspace status
+# script tells BuildBuddy the repository, commit, branch, user and host of
+# each run.
+build:buildbuddy --credential_helper=remote.buildbuddy.io=%workspace%/.github/scripts/buildbuddy-credential-helper.sh
+build:buildbuddy --workspace_status_command=.github/scripts/buildbuddy-workspace-status.sh
+
+# A test run under BuildBuddy downloads no test output but the logs Bazel
+# needs; the reference comparison's log is downloaded as well, so that
+# the runner script can print its seed and digest into the job's log.
+test:buildbuddy --remote_download_regex=.*/testlogs/tests/differential_fuzzer/test\.log$
 
 # Try the user-local bazelrc if it exists. Not committed. Use this to
 # set credentials, point at a personal remote cache, or override any
 # of the configs above without touching the committed file.
 try-import %workspace%/.bazelrc.user
-
-# BuildBuddy Remote Cache Configuration
-build:buildbuddy --bes_results_url=https://app.buildbuddy.io/invocation/
-build:buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
-build:buildbuddy --remote_cache=grpcs://remote.buildbuddy.io
-build:buildbuddy --remote_timeout=3600
-
-# Optional performance optimizations
-build:buildbuddy --experimental_remote_cache_async
-build:buildbuddy --experimental_remote_cache_compression

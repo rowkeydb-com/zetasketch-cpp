@@ -5,7 +5,6 @@
 [![Sanitizers][sanitizer-badge]][sanitizer-link]
 [![Code Coverage][coverage-badge]][coverage-link]
 [![codecov][codecov-badge]][codecov-link]
-[![arm64][arm64-badge]][arm64-link]
 
 The purpose of this repository is to provide a standalone C++ implementation
 of Google's ZetaSketch format. This format is the serialization schema used
@@ -217,7 +216,8 @@ estimate, up to the first refusal, and where the reference throws,
 this library refuses at the same step; the wording of a refusal is not
 compared. There are 63,048 such sequences; every continuous-integration
 test job compares all of them, and every one has agreed in every job,
-on x86_64 and on arm64. Nothing after a refusal is compared.
+on x86_64, and on arm64 up to commit `0eead28`. Nothing after a
+refusal is compared.
 
 Beyond that set, every continuous-integration test job draws a seed
 from the clock, prints it in its log with a digest of the sample,
@@ -268,8 +268,9 @@ promoting count, merged in both orders.
   only while empty, since this library offers no 32-bit addition
   and no test adds one through the reference.
 - Reference: the Java library built from source at revision
-  `d098c49`, on x86_64 and on arm64, under the release build and
-  under the address, undefined-behaviour, thread and memory sanitizers.
+  `d098c49`, on x86_64, and on arm64 up to commit `0eead28`, under the
+  release build and under the address, undefined-behaviour, thread and
+  memory sanitizers.
 - Precisions: normal precisions 4 to 24 and sparse precisions from
 the normal precision to 25 or disabled are accepted, as the reference
 accepts them; sketches holding values are compared at every normal
@@ -308,10 +309,16 @@ into the message, and the message into the output; a caller that
 keeps its output vector between writes saves the last of those. A
 refused operation allocates for its message.
 
-The continuous integration pipeline executes hermetic builds within
-Docker containers. The code passes `clang-tidy` with the checks named
-in `.clang-tidy`, and every test runs under the address, undefined
-behaviour, thread and memory sanitizers on both architectures.
+The continuous integration pipeline builds on the infrastructure
+shared with RowKeyDB (`rowkeydb-com/rowkeydb-build-infra`): Bazel runs
+in that repository's image, named by digest, on GitHub's machines, and
+BuildBuddy executes every action in the same image; a pull request from
+a fork, which GitHub gives no secret, is built on GitHub's machine
+alone. The code passes `clang-tidy` with the
+checks named in `.clang-tidy`, and every test runs under the address,
+undefined behaviour, thread and memory sanitizers on x86_64. Up to
+commit `0eead28` they also ran on arm64; that returns when the shared
+infrastructure provides an arm64 image.
 
 ## License and Copyright
 
@@ -333,5 +340,3 @@ RowKeyDB (2026).
 [coverage-link]: https://github.com/rowkeydb-com/zetasketch-cpp/actions/workflows/coverage.yml
 [codecov-badge]: https://codecov.io/gh/rowkeydb-com/zetasketch-cpp/graph/badge.svg
 [codecov-link]: https://codecov.io/gh/rowkeydb-com/zetasketch-cpp
-[arm64-badge]: https://img.shields.io/badge/arm64-supported-brightgreen.svg
-[arm64-link]: https://github.com/rowkeydb-com/zetasketch-cpp

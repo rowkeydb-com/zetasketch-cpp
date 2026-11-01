@@ -1,0 +1,307 @@
+# Copied from rowkeydb-com/rowkeydb-build-infra at 3dd5cce32a5865b5ee1bda60c9997d23ddd004aa.
+# SHA-256 of the lines below: 6706a337c590b274d9ced84d82be584d7f1953f182081ca7a66b2a131141e2d8.
+# Copyright 2019 Google LLC (original file)
+# Copyright 2026 Chanzo (modifications)
+#
+# This file is derived from the .bazelrc of Google's google-cloud-cpp, from
+# which rowkeydb's .bazelrc descends. Chanzo has modified it: options were
+# added, removed and reordered, and comments were rewritten.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Build options shared by the repositories built on this infrastructure.
+#
+# A consumer keeps a copy of this file at bazel/build_infra/shared.bazelrc,
+# whose first lines name the commit of this repository it was copied from
+# and the SHA-256 of the lines below them, and imports it with `import`,
+# never `try-import`. scripts/check.sh compares the copy with this file.
+#
+# Bazel keeps the values of an accumulating option (--copt, --cxxopt,
+# --per_file_copt, --host_*, --linkopt, --features) in the order it reads
+# them, an imported file being read at the line of its `import`. A
+# consumer's own options therefore stand before or after this file's as its
+# command lines require; rowkeydb imports it after its `--define` of the
+# version and before its RocksDB alignment exception.
+
+# Fail when a version a consumer declares differs from the one its graph
+# resolves, so that a version is never raised silently.
+common --check_direct_dependencies=error
+
+# Build with GCC on Linux, rather than with whichever compiler Bazel finds
+# first; clang is also installed in the image. The sanitizer configurations
+# use clang instead, through --config=clang.
+build:linux --repo_env=CC=gcc-14
+build:linux --repo_env=CXX=g++-14
+
+# C++23, which comes after the toolchain's own -std=c++17 and so replaces it.
+build:linux --cxxopt=-std=c++2b
+build:linux --cxxopt=-Wall --host_cxxopt=-Wall
+build:linux --cxxopt=-Wextra --host_cxxopt=-Wextra
+build:linux --cxxopt=-Werror --host_cxxopt=-Werror
+# Google C++ Style Guide: no exceptions, in every compilation, the tools
+# built for the host (protoc, the gRPC plugins) included. Dependencies
+# (abseil, protobuf, gRPC) detect this flag and switch to abort-on-error
+# code paths.
+build:linux --cxxopt=-fno-exceptions --host_cxxopt=-fno-exceptions
+# Google C++ Style Guide: no run-time type information, in every
+# compilation, host tools included. Abseil, protobuf, gRPC and the
+# OpenTelemetry C++ SDK compile without it: each leaves out its uses of
+# dynamic_cast and typeid when it is off. A dependency which needs it gets
+# -frtti back, for its own files only, from the consumer which builds it, as
+# RocksDB does from rowkeydb: its transaction code asserts with dynamic_cast
+# wherever NDEBUG is not defined.
+build:linux --cxxopt=-fno-rtti --host_cxxopt=-fno-rtti
+# Suppress GCC's -Wmissing-requires from protobuf headers (GCC 14 and
+# later, C++20 and later).
+# GCC ignores -Wno-unknown-warning-option; it tells clang to ignore -W
+# options it does not know, so that the same options serve both compilers.
+build:linux --cxxopt=-Wno-missing-requires
+build:linux --cxxopt=-Wno-unknown-warning-option
+build:linux --per_file_copt=external/.*@-w
+build:linux --host_per_file_copt=external/.*@-w
+# Host tools (protoc, grpc_cpp_plugin) also need C++23.
+build:linux --host_cxxopt=-std=c++2b
+
+# The options for third-party code, the same in every repository, so that
+# its compilations are shared: debug information and frame pointers, for
+# stack traces through a dependency; the x86-64-v3 target with PCLMUL,
+# which every CI runner and benchmark host has (c7a, Zen 4), and which
+# RocksDB's crc32c needs for its carry-less-multiply path; and the
+# OpenTelemetry C++ SDK's exemplar API, which its preview gate hides. A
+# repository applies its own options to its own code only, with
+# `--per_file_copt=.*,-external/.*,-^[^/][^/][^/]+//@...`. Bazel splits
+# the option at its first `@` and the expressions at every comma not
+# preceded by a backslash, so an expression can hold neither the `@@`
+# which begins a label's canonical form nor a counted repetition. It
+# matches each expression against a file's path and against its label; a
+# dependency's label has its repository's name, at least one character,
+# between `@@` and `//`, where the repository's own has none, so the
+# second exclusion leaves out a dependency's files by their labels, the
+# first by their paths.
+build --per_file_copt=external/.*@-g,-fno-omit-frame-pointer
+build:linux --per_file_copt=external/.*@-march=x86-64-v3,-mpclmul
+build --per_file_copt=external/.*@-DENABLE_METRICS_EXEMPLAR_PREVIEW
+
+# Clang's layering check, a feature only the clang toolchain has, is off in
+# the target configuration. Abseil's packages turn it on for themselves, so
+# a consumer which left it alone would compile Abseil with other options
+# than one which turned it off. It is off rather than on because gRPC
+# includes zlib's private zconf.h and zlib.h, which the check rejects from
+# outside zlib. Bazel lets a negative --features value override every
+# package's and target's own setting, so a consumer's package which asks
+# for the check does not get it either. Tools built for the host keep each
+# package's own setting, the same in every consumer.
+build --features=-layering_check
+
+# Suppress convenience symlinks (bazel-bin, bazel-out, etc.)
+build --experimental_convenience_symlinks=ignore
+
+# Show full output on failure (no truncation).
+build --experimental_ui_max_stdouterr_bytes=-1
+
+# Run tests in a random order, so that a test which depends on another is
+# found.
+test --test_env=GTEST_SHUFFLE --test_env=GTEST_RANDOM_SEED
+
+# Suppress warnings from external dependencies.
+build --output_filter='^//((?!(external):).)*$'
+
+# --config release: Release build (optimized)
+build:release --compilation_mode=opt
+
+# --config lto: link-time optimization, used with --config=release for the
+# builds a consumer ships. It is kept out of the release configuration
+# because an LTO link of a large graph (gRPC, protobuf and the rest) runs
+# again whenever any input changes, which would slow every build made on a
+# push. A consumer's release scripts select it, with --config=release
+# --config=lto. -flto=auto lets the link use every processor.
+build:lto --copt=-flto=auto
+build:lto --linkopt=-flto=auto
+# Embed a build-id so that a stripped binary and its split-out debug file
+# can be matched for offline symbolization.
+build:lto --linkopt=-Wl,--build-id=sha1
+
+# --config debug: Debug build (with symbols, no optimization)
+build:debug --compilation_mode=dbg
+
+# --config libcxx: Compile and link using libc++.
+build:libcxx --cxxopt=-stdlib=libc++
+build:libcxx --linkopt=-stdlib=libc++
+build:libcxx --linkopt=-lc++
+build:libcxx --linkopt=-lc++abi
+
+# Sanitizers: built with clang because of GCC bug #71962 (constexpr pointer
+# comparisons with -fsanitize=undefined). The sanitizer configurations
+# include --config=clang, below.
+
+# --config clang: the clang toolchain and the compile-time thread-safety
+# analysis. -Wthread-safety checks ABSL_GUARDED_BY, ABSL_LOCKS_REQUIRED,
+# ABSL_ACQUIRED_BEFORE and the related annotations while compiling, and
+# -Werror=thread-safety makes a violation fail the build. `bazel build
+# --config=clang //...` checks the annotations without a sanitizer's cost.
+build:clang --repo_env=CC=clang-19
+build:clang --repo_env=CXX=clang++-19
+build:clang --cxxopt=-Wthread-safety
+build:clang --cxxopt=-Werror=thread-safety
+
+# --config sanitizer: Common settings for all sanitizers.
+# Optimize at -O2 in fastbuild mode (-U_FORTIFY_SOURCE, assertions kept) while
+# keeping leaf frame pointers and preventing tail-call frame elision in stack
+# traces. A consumer may set -g, --strip=never and -fno-omit-frame-pointer in
+# its own options; rowkeydb and rowkeyraft do, for every build.
+build:sanitizer --copt=-O2
+build:sanitizer --copt=-mno-omit-leaf-frame-pointer
+build:sanitizer --copt=-fno-optimize-sibling-calls
+# Stop at the first report of every sanitizer, rather than print it and carry
+# on, as most of UndefinedBehaviorSanitizer's checks otherwise do. It is set
+# for every compilation of every sanitizer configuration, third-party code
+# included, so that the consumers compile their dependencies alike.
+build:sanitizer --copt=-fno-sanitize-recover=all
+# Sanitizers make tests slower: ASan by about two to three times, TSan by
+# five to twenty. The timeouts for each test size are therefore twice the
+# defaults, the eternal one apart, so that a large test is not stopped at
+# the default 900 seconds. Their order is short, moderate, long, eternal.
+test:sanitizer --test_timeout=120,600,1800,3600
+
+# --config asan: Address Sanitizer
+build:asan --config=sanitizer
+build:asan --copt=-fsanitize=address
+build:asan --linkopt=-fsanitize=address
+# Annotate std::vector for AddressSanitizer, so that an access to its unused
+# capacity is reported. libstdc++ requires _GLIBCXX_SANITIZE_VECTOR to have
+# the same value in every translation unit that creates, destroys or
+# modifies a vector, so it is set here, for every compilation of an ASan
+# build, third-party code included.
+build:asan --cxxopt=-D_GLIBCXX_SANITIZE_VECTOR
+build:asan --action_env=ASAN_OPTIONS=detect_leaks=1:color=always
+build:asan --action_env=LSAN_OPTIONS=report_objects=1
+
+# --config tsan: Thread Sanitizer
+build:tsan --config=sanitizer
+build:tsan --config=clang
+build:tsan --copt=-fsanitize=thread
+build:tsan --linkopt=-fsanitize=thread
+build:tsan --action_env=TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:report_atomic_races=0
+
+# --config asan-ubsan: Combined Address Sanitizer and UBSan
+# Excludes vptr checks (would need instrumented C++ runtime).
+build:asan-ubsan --config=asan
+build:asan-ubsan --config=clang
+build:asan-ubsan --copt=-fsanitize=undefined
+build:asan-ubsan --copt=-fno-sanitize=vptr
+build:asan-ubsan --linkopt=-fsanitize=undefined
+build:asan-ubsan --linkopt=-fno-sanitize=vptr
+build:asan-ubsan --action_env=UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+
+# --config msan: Memory Sanitizer (requires instrumented libc++).
+# Instrument memory, track the allocation origins of uninitialized values
+# (level 1, without intermediate store chaining), and detect use after
+# destruction. Optimization (-O2) comes from --config=sanitizer.
+build:msan --config=sanitizer
+build:msan --config=clang
+build:msan --copt=-fsanitize=memory
+build:msan --copt=-fsanitize-memory-track-origins=1
+build:msan --copt=-fsanitize-memory-use-after-dtor
+build:msan --cxxopt=-std=c++2b
+build:msan --linkopt=-fsanitize=memory
+build:msan --action_env=MSAN_OPTIONS=poison_in_dtor=1
+
+# Compile and link against libc++ instead of the default libstdc++.
+build:msan --cxxopt=-stdlib=libc++
+build:msan --linkopt=-stdlib=libc++
+
+# Point the compiler and linker to the image's MSan-instrumented libc++.
+build:msan --cxxopt=-isystem/usr/lib/llvm-19/include/c++/v1
+build:msan --linkopt=-L/usr/lib/llvm-19/lib/msan
+
+# Explicitly link the C++ standard library and its ABI
+build:msan --cxxopt=-fexperimental-library
+build:msan --linkopt=-nostdlib++
+build:msan --linkopt=/usr/lib/llvm-19/lib/msan/libc++.a
+build:msan --linkopt=/usr/lib/llvm-19/lib/msan/libc++abi.a
+build:msan --linkopt=/usr/lib/llvm-19/lib/msan/libc++experimental.a
+
+# Record the instrumented libraries' directory in the executable's run-time
+# search path.
+build:msan --linkopt=-Wl,-rpath,/usr/lib/llvm-19/lib/msan
+
+# --config clang-tidy
+build:clang-tidy --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl%clang_tidy_aspect
+build:clang-tidy --@bazel_clang_tidy//:clang_tidy_config=//:clang_tidy_config
+build:clang-tidy --output_groups=report
+
+# Coverage
+coverage --combined_report=lcov
+coverage --instrument_test_targets=false
+
+# Disk cache: kept across clean builds and configurations, so that a
+# rebuild finds earlier results. Bazel deletes its oldest entries to keep it
+# under 50 GB. A consumer's container scripts may pass a --disk_cache of
+# their own.
+build --disk_cache=~/.cache/bazel/disk-cache
+build --experimental_disk_cache_gc_max_size=50G
+
+# The image every action runs in, named by the digest of its linux/amd64
+# image, for every configuration, so that the cache keys of local builds
+# name it as well as those of remote ones. image.bzl holds the same digest
+# for the execution platforms in buildbuddy/; scripts/check.sh compares
+# them.
+build --remote_default_exec_properties=container-image=docker://ghcr.io/rowkeydb-com/rowkeydb-build-infra@sha256:c811e74114ebedf787178468c9a796e4e37ae7e55f2d2fdc63501ea940c04515
+
+# BuildBuddy Remote Build Execution Configuration. A consumer adds its own
+# --credential_helper and --workspace_status_command.
+build:buildbuddy --remote_executor=grpcs://remote.buildbuddy.io
+build:buildbuddy --remote_cache=grpcs://remote.buildbuddy.io
+build:buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
+build:buildbuddy --bes_results_url=https://app.buildbuddy.io/invocation/
+build:buildbuddy --remote_timeout=3600
+build:buildbuddy --remote_download_toplevel
+build:buildbuddy --jobs=100
+build:buildbuddy --remote_cache_compression
+build:buildbuddy --experimental_remote_cache_compression_threshold=100
+build:buildbuddy --execution_log_compact_file=/tmp/execution_log.binpb.zst
+build:buildbuddy --noslim_profile
+build:buildbuddy --experimental_profile_include_target_label
+build:buildbuddy --experimental_profile_include_primary_output
+build:buildbuddy --nolegacy_important_outputs
+# The platform every action runs on, from buildbuddy/ in this module, the
+# same in every consumer. --extra_execution_platforms keeps only the last
+# value given, so each sanitizer variant replaces the platform of
+# --config=buildbuddy with its own, whose tests run in virtual machines.
+build:buildbuddy --extra_execution_platforms=@rowkeydb_build_infra//buildbuddy:executor
+build:buildbuddy-tsan --config=buildbuddy
+build:buildbuddy-tsan --extra_execution_platforms=@rowkeydb_build_infra//buildbuddy:executor_tests_in_vm
+build:buildbuddy-msan --config=buildbuddy
+build:buildbuddy-msan --extra_execution_platforms=@rowkeydb_build_infra//buildbuddy:executor_msan
+coverage:buildbuddy --experimental_split_coverage_postprocessing
+coverage:buildbuddy --experimental_fetch_all_coverage_outputs
+# A test or coverage run downloads only what Bazel itself needs, such as
+# the test logs, and not the test binaries, which run on the executors and
+# which no step reads afterwards; a build still downloads its top-level
+# outputs. The combined coverage report, which the consumers copy out after
+# a coverage run, is always downloaded.
+test:buildbuddy --remote_download_minimal
+coverage:buildbuddy --remote_download_regex=.*/_coverage/_coverage_report\.dat$
+
+# Hardware configuration profiles, used by CI to fit Bazel's analysis and
+# execution to the runner. A runner which only hosts the Bazel client while
+# BuildBuddy executes, on a machine with little memory to spare, uses the
+# laptop profile.
+
+build:laptop --local_resources=memory=HOST_RAM*.5
+
+# Standard GitHub runners have moderate resources.
+build:gh-standard --local_resources=memory=HOST_RAM*.8
+
+# Self-hosted runners on dedicated machines, with memory to spare.
+build:bare-metal --local_resources=memory=HOST_RAM*.9

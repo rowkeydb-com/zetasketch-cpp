@@ -154,6 +154,11 @@ cc_test(
     timeout = "long",
     data = [":ZetaSketchCli"],
     args = ["--java_cli=tests/ZetaSketchCli"],
+    # On BuildBuddy, a test process is given the memory its action asks
+    # for. This one starts the Java reference beside the instrumented test,
+    # and four gigabytes leaves room for both; the request replaces the
+    # platform's, under every configuration.
+    exec_properties = {"test.EstimatedMemory": "4GB"},
     deps = [
         "//:zetasketch-cpp",
         "@googletest//:gtest",

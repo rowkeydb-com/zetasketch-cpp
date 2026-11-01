@@ -3,6 +3,24 @@ module(
     version = "0.1.0",
 )
 
+# The build infrastructure shared with rowkeydb, rowkeyraft and limen: the
+# image every action runs in, the versions of the shared modules and the
+# options in bazel/build_infra/shared.bazelrc (rowkeydb's
+# design/shared_build_architecture.md). Pinned to the archive of one
+# commit, published as an asset of its release; the shared options are
+# copied from the same commit. A development dependency, as the design's
+# section on the shared Bazel module requires of a library: a consumer of
+# zetasketch-cpp need not find the module in any registry.
+bazel_dep(name = "rowkeydb_build_infra", version = "0.8.0", dev_dependency = True)
+archive_override(
+    module_name = "rowkeydb_build_infra",
+    integrity = "sha256-Ey69Vx5aGhVK7hb+Jl33ULD6rbUY5PHZBUz5rFwWPd4=",
+    strip_prefix = "rowkeydb-build-infra-3dd5cce32a5865b5ee1bda60c9997d23ddd004aa",
+    urls = [
+        "https://github.com/rowkeydb-com/rowkeydb-build-infra/releases/download/v0.8.0/rowkeydb-build-infra-3dd5cce32a5865b5ee1bda60c9997d23ddd004aa.tar.gz",
+    ],
+)
+
 # --- clang-tidy ---
 git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
@@ -13,10 +31,14 @@ git_repository(
 )
 
 # --- Dependencies ---
-bazel_dep(name = "rules_cc", version = "0.0.9")
-bazel_dep(name = "protobuf", version = "33.5")
-bazel_dep(name = "googletest", version = "1.14.0")
-bazel_dep(name = "rules_jvm_external", version = "6.1")
+# rules_cc, protobuf and googletest at the versions rowkeydb_build_infra
+# approves, which its scripts/check.sh compares. It approves zlib as well,
+# which protobuf brings into the graph, so the graph selects the approved
+# version.
+bazel_dep(name = "rules_cc", version = "0.2.26")
+bazel_dep(name = "protobuf", version = "36.2")
+bazel_dep(name = "googletest", version = "1.18.0")
+bazel_dep(name = "rules_jvm_external", version = "6.9")
 maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
 
 # The dependencies of the Java reference implementation, taken from its
@@ -30,7 +52,7 @@ maven.install(
         "com.google.code.findbugs:jsr305:3.0.2",
         "com.google.errorprone:error_prone_annotations:2.14.0",
         "com.google.guava:guava:33.0.0-jre",
-        "com.google.protobuf:protobuf-java:4.33.5",
+        "com.google.protobuf:protobuf-java:4.36.2",
         "it.unimi.dsi:fastutil:8.2.2",
         "org.checkerframework:checker-qual:3.30.0",
     ],
