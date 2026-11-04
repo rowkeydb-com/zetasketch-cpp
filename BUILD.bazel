@@ -1,8 +1,14 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
-filegroup(name="empty")
+filegroup(name = "empty")
 
-exports_files(["include/zetasketch/bias_data.h"])
+# The Gazelle test of //bazel/gazelle finds the repository through
+# MODULE.bazel, which this package, having no default visibility, would
+# otherwise keep to itself.
+exports_files([
+    "MODULE.bazel",
+    "include/zetasketch/bias_data.h",
+])
 
 filegroup(
     name = "clang_tidy_config",
@@ -12,7 +18,7 @@ filegroup(
 
 filegroup(
     name = "clang_tidy_analyzer_config",
-    srcs = [".clang-tidy"], # Will use same config for now
+    srcs = [".clang-tidy"],  # Will use same config for now
     visibility = ["//visibility:public"],
 )
 
@@ -27,25 +33,25 @@ cc_library(
     ],
     hdrs = [
         "include/zetasketch/bias_data.h",
-        "include/zetasketch/utils/error.h",
-        "include/zetasketch/utils/var_int.h",
-        "include/zetasketch/utils/buffer_traits.h",
-        "include/zetasketch/utils/iterators.h",
-        "include/zetasketch/hll/state.h",
-        "include/zetasketch/hll/representation.h",
         "include/zetasketch/hll/encoding.h",
         "include/zetasketch/hll/math_utils.h",
         "include/zetasketch/hll/normal_representation.h",
+        "include/zetasketch/hll/representation.h",
         "include/zetasketch/hll/sparse_buffer.h",
         "include/zetasketch/hll/sparse_representation.h",
+        "include/zetasketch/hll/state.h",
         "include/zetasketch/hyperloglogplusplus.h",
+        "include/zetasketch/utils/buffer_traits.h",
+        "include/zetasketch/utils/error.h",
+        "include/zetasketch/utils/iterators.h",
+        "include/zetasketch/utils/var_int.h",
     ],
     copts = ["-std=c++23"],
     includes = ["include"],
     visibility = ["//visibility:public"],
     deps = [
-        "@protobuf//:protobuf",
-        "//src/proto:zetasketch_cc_proto",
         "//src/farmhash",
+        "//src/proto:zetasketch_cc_proto",
+        "@protobuf",
     ],
 )

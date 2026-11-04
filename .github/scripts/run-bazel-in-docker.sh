@@ -3,8 +3,14 @@
 #
 # Usage: run-bazel-in-docker.sh <config> <command> [bazel_args...]
 #   config:  release | asan-ubsan | tsan | msan | clang-tidy |
-#            clang-tidy-analyzer | coverage
+#            clang-tidy-analyzer | coverage | gazelle
 #   command: build | test | coverage
+#
+# Every configuration runs on //... but gazelle, which runs
+# //bazel/gazelle:gazelle_test, the check that the BUILD files of the Go
+# code are the ones Gazelle writes. gazelle passes no --config, so that
+# Gazelle is built with the shared options alone, as in every repository
+# which shares them, and no seed.
 #
 # The image is the one rowkeydb-com/rowkeydb-build-infra publishes, named
 # by its digest below and pulled on first use; CI_DOCKER_IMAGE names
@@ -49,7 +55,7 @@ trap cleanup EXIT
 
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <config> <command> [bazel_args...]" >&2
-    echo "  config:  release | asan-ubsan | tsan | msan | clang-tidy | clang-tidy-analyzer | coverage" >&2
+    echo "  config:  release | asan-ubsan | tsan | msan | clang-tidy | clang-tidy-analyzer | coverage | gazelle" >&2
     echo "  command: build | test | coverage" >&2
     exit 1
 fi
@@ -59,7 +65,7 @@ COMMAND="$2"
 shift 2
 
 case "$CONFIG" in
-    release|asan-ubsan|tsan|msan|clang-tidy|clang-tidy-analyzer|coverage) ;;
+    release|asan-ubsan|tsan|msan|clang-tidy|clang-tidy-analyzer|coverage|gazelle) ;;
     *)
         echo "Error: invalid config '$CONFIG'" >&2
         exit 1
@@ -73,6 +79,15 @@ case "$COMMAND" in
         exit 1
         ;;
 esac
+
+# What the command runs on, and the configuration it names.
+TARGET="//..."
+CONFIG_OPTS=(--config="$CONFIG")
+if [ "$CONFIG" = "gazelle" ]; then
+    TARGET="//bazel/gazelle:gazelle_test"
+    CONFIG_OPTS=()
+fi
+readonly TARGET
 
 EXECUTION="${ZETASKETCH_EXECUTION:-local}"
 case "$EXECUTION" in
@@ -134,11 +149,17 @@ BAZEL_OPTS+=(--disk_cache=/tmp/bazel-disk-cache)
 # of the Java reference and the Java runtime it runs under, which would
 # otherwise be fetched afresh by every container. The repository cache is
 # content addressed as well, and made to be shared, the steps which run
-# side by side included. ZETASKETCH_REPOSITORY_CACHE puts it elsewhere.
-HOST_REPOSITORY_CACHE="${ZETASKETCH_REPOSITORY_CACHE:-$HOME/.cache/zetasketch-cpp-bazel-repository}"
+# side by side included, and so are the four repositories which share
+# rowkeydb-build-infra, which use one directory. Its contents cache keeps
+# the repositories Bazel fetched and marked reproducible, Gazelle's tools
+# and Go modules among them, so that a later run reuses them without
+# fetching or building them again; Bazel 8 turns it on only when asked.
+# ZETASKETCH_REPOSITORY_CACHE puts it elsewhere.
+HOST_REPOSITORY_CACHE="${ZETASKETCH_REPOSITORY_CACHE:-$HOME/.cache/bazel-repository}"
 mkdir -p "$HOST_REPOSITORY_CACHE"
 DOCKER_OPTS+=(-v "$HOST_REPOSITORY_CACHE:/tmp/bazel-repository-cache")
 BAZEL_OPTS+=(--repository_cache=/tmp/bazel-repository-cache)
+BAZEL_OPTS+=(--repo_contents_cache=/tmp/bazel-repository-cache/contents)
 
 if [ -n "${BAZEL_REMOTE_CACHE:-}" ]; then
     BAZEL_OPTS+=(--remote_cache="$BAZEL_REMOTE_CACHE" --remote_upload_local_results=true)
@@ -210,8 +231,8 @@ fi
 # after the run, and replays the sample exactly. Passing it as a test
 # argument also keeps Bazel from serving a cached verdict. A test
 # argument is a test option, so it is passed only to the commands that
-# run tests.
-if [ "$COMMAND" = "test" ] || [ "$COMMAND" = "coverage" ]; then
+# run tests, and not to the Gazelle test, which takes no seed.
+if { [ "$COMMAND" = "test" ] || [ "$COMMAND" = "coverage" ]; } && [ "$CONFIG" != "gazelle" ]; then
     BAZEL_OPTS+=(--test_arg=--seed="$(date +%s%N)")
 fi
 
@@ -255,20 +276,23 @@ if [ "$COMMAND" = "coverage" ]; then
     ' coverage-in-container "${PRIORITY[@]}" "${BAZEL_OPTS[@]}" "$@"
 else
     # The arguments are passed positionally, as above: the five words of
-    # the priority command, then the command. After a test run the seed
-    # and digest of the random reference comparison are printed into the
-    # log, which a passing test leaves only in its own.
+    # the priority command, then the command and what it runs on. After a
+    # test run of //... the seed and digest of the random reference
+    # comparison are printed into the log, which a passing test leaves
+    # only in its own.
     docker run "${DOCKER_OPTS[@]}" "$DOCKER_IMAGE" bash -c '
         command="$6"
-        "${@:1:5}" bazel "$command" "${@:7}" //...
+        target="$7"
+        "${@:1:5}" bazel "$command" "${@:8}" "$target"
         rc=$?
-        if [ "$command" = "test" ]; then
+        if [ "$command" = "test" ] && [ "$target" = "//..." ]; then
             fuzzer_log=$(find "$(bazel info output_path)" \
                 -path "*/testlogs/tests/differential_fuzzer/test.log" | head -n 1)
             [ -n "$fuzzer_log" ] && grep -h "^seed=\|^sequences compared" "$fuzzer_log"
         fi
         exit $rc
-    ' bazel-in-container "${PRIORITY[@]}" "$COMMAND" "${BAZEL_OPTS[@]}" --config="$CONFIG" "$@"
+    ' bazel-in-container "${PRIORITY[@]}" "$COMMAND" "$TARGET" "${BAZEL_OPTS[@]}" \
+        "${CONFIG_OPTS[@]+"${CONFIG_OPTS[@]}"}" "$@"
 fi
 rc=$?
 set -e
