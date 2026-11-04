@@ -1,3 +1,5 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+
 package(default_visibility = ["//visibility:public"])
 
 proto_library(
@@ -9,10 +11,10 @@ proto_library(
         "hllplusplus.proto",
         "unique-stats.proto",
     ],
+    strip_import_prefix = "",
     deps = [
         "@protobuf//:descriptor_proto",
     ],
-    strip_import_prefix = "",
 )
 
 cc_proto_library(

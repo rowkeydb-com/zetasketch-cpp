@@ -145,15 +145,15 @@ java_binary(
 
 cc_test(
     name = "differential_fuzzer",
-    srcs = ["differential_fuzzer_test.cpp"],
     # This target launches the reference hundreds of times: once per
     # configuration and population for the create and merge comparisons,
     # and once for each product driven through it. Under the memory
     # sanitizer on a slow runner that exceeds the default timeout, which
     # is what the declaration below raises.
     timeout = "long",
-    data = [":ZetaSketchCli"],
+    srcs = ["differential_fuzzer_test.cpp"],
     args = ["--java_cli=tests/ZetaSketchCli"],
+    data = [":ZetaSketchCli"],
     # On BuildBuddy, a test process is given the memory its action asks
     # for. This one starts the Java reference beside the instrumented test,
     # and four gigabytes leaves room for both; the request replaces the
@@ -173,4 +173,3 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
-
